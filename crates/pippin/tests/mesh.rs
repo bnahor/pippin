@@ -110,3 +110,11 @@ fn mesh_from_obj_file_with_scale() {
     let lowest = hull.vertices.iter().map(|v| (d.xpos[b] + d.xmat[b].mul_vec(*v))[2]).fold(Real::MAX, Real::min);
     assert!(lowest.abs() < 2e-3, "lowest point at {lowest}");
 }
+
+#[test]
+fn urdf_loads_from_relative_path() {
+    // meshes must resolve relative to the URDF file, not twice
+    let m = pippin::mjcf::load_file("../../assets/urdf/arm.urdf").unwrap();
+    assert_eq!(m.jnt_names, ["shoulder_yaw", "elbow", "slider"]);
+    assert_eq!(m.mesh_hull.len(), 1);
+}

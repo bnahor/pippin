@@ -16,10 +16,26 @@ pub struct PyAsyncEnv {
     image: Option<(usize, usize, usize)>,
 }
 
+/// `model` is a file path (MJCF or URDF) or an MJCF string.
 fn physics(model: &str, backend: &str, n: usize) -> PyResult<Box<dyn Physics>> {
+    let is_xml = model.trim_start().starts_with('<');
+    let err = |e: &dyn std::fmt::Display| PyValueError::new_err(e.to_string());
     Ok(match backend {
-        "pippin" => Box::new(PippinCpu::from_file(model, n).map_err(|e| PyValueError::new_err(e.to_string()))?),
-        "mujoco" => Box::new(pippin_mujoco::MujocoPhysics::from_file(model, n).map_err(|e| PyValueError::new_err(e.to_string()))?),
+        "pippin" => {
+            let m = if is_xml { pippin::mjcf::load_str(model) } else { pippin::mjcf::load_file(model) }.map_err(|e| err(&e))?;
+            Box::new(PippinCpu::new(m, n))
+        }
+        "mujoco" => {
+            // MuJoCo loads from files; stage strings in a temp file
+            let path = if is_xml {
+                let p = std::env::temp_dir().join(format!("pippin_model_{}.xml", std::process::id()));
+                std::fs::write(&p, model).map_err(|e| err(&e))?;
+                p.to_string_lossy().into_owned()
+            } else {
+                model.to_string()
+            };
+            Box::new(pippin_mujoco::MujocoPhysics::from_file(&path, n).map_err(|e| err(&e))?)
+        }
         other => return Err(PyValueError::new_err(format!("unknown backend '{other}' (use 'pippin' or 'mujoco')"))),
     })
 }

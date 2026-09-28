@@ -173,8 +173,70 @@ impl PySim {
     }
 }
 
+fn load_model(model: &str) -> PyResult<pippin::Model> {
+    if model.trim_start().starts_with('<') { mjcf::load_str(model) } else { mjcf::load_file(model) }
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// Convert a URDF file to an MJCF string (mesh paths made absolute).
+#[pyfunction]
+#[pyo3(signature = (path, floating_base = false))]
+fn urdf_to_mjcf(path: &str, floating_base: bool) -> PyResult<String> {
+    let text = std::fs::read_to_string(path).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let base = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
+    let base = std::fs::canonicalize(base).unwrap_or(base.to_path_buf());
+    let opts = pippin::urdf::UrdfOptions { floating_base, ..Default::default() };
+    let (xml, warnings) = pippin::urdf::to_mjcf(&text, &base, &opts).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    for w in warnings {
+        eprintln!("pippin urdf warning: {w}");
+    }
+    Ok(xml)
+}
+
+/// Layout of a model: dimensions and name -> index/address tables.
+#[pyfunction]
+fn model_info<'py>(py: Python<'py>, model: &str) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    let m = load_model(model)?;
+    let d = pyo3::types::PyDict::new(py);
+    d.set_item("nq", m.nq)?;
+    d.set_item("nv", m.nv)?;
+    d.set_item("nu", m.nu)?;
+    d.set_item("qpos0", m.qpos0.clone())?;
+    d.set_item("joint_names", m.jnt_names.clone())?;
+    d.set_item("joint_qposadr", m.jnt_qposadr.clone())?;
+    d.set_item("body_names", m.body_names.clone())?;
+    d.set_item("geom_names", m.geom_names.clone())?;
+    d.set_item("actuator_names", m.actuator_names.clone())?;
+    Ok(d)
+}
+
+/// Mass properties of a mesh file's convex hull (per unit density):
+/// volume, center of mass, inertia about the com, and bounding box.
+#[pyfunction]
+#[pyo3(signature = (path, scale = (1.0, 1.0, 1.0)))]
+fn mesh_properties<'py>(py: Python<'py>, path: &str, scale: (f64, f64, f64)) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    let mut mesh = pippin::mesh::load(std::path::Path::new(path)).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    for v in &mut mesh.vertices {
+        *v = v.mul_elem(pippin::math::Vec3::new(scale.0, scale.1, scale.2));
+    }
+    let hull = pippin::mesh::convex_hull(&mesh.vertices);
+    let (vol, com, inertia) = pippin::mesh::mass_properties(&hull);
+    let lo = hull.vertices.iter().fold(pippin::math::Vec3::new(f64::MAX, f64::MAX, f64::MAX), |a, v| a.min(*v));
+    let hi = hull.vertices.iter().fold(pippin::math::Vec3::new(f64::MIN, f64::MIN, f64::MIN), |a, v| a.max(*v));
+    let d = pyo3::types::PyDict::new(py);
+    d.set_item("volume", vol)?;
+    d.set_item("com", com.0.to_vec())?;
+    d.set_item("inertia", inertia.0.to_vec())?;
+    d.set_item("min", lo.0.to_vec())?;
+    d.set_item("max", hi.0.to_vec())?;
+    Ok(d)
+}
+
 #[pymodule]
 fn _pippin(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(urdf_to_mjcf, m)?)?;
+    m.add_function(wrap_pyfunction!(model_info, m)?)?;
+    m.add_function(wrap_pyfunction!(mesh_properties, m)?)?;
     m.add_class::<PySim>()?;
     m.add_class::<async_env::PyAsyncEnv>()?;
     Ok(())

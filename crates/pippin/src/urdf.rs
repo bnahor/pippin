@@ -100,7 +100,7 @@ impl Converter<'_> {
             for d in dirs {
                 for cand in [d.join(pkg).join(rel), d.join(rel)] {
                     if cand.exists() {
-                        return Some(cand);
+                        return std::fs::canonicalize(&cand).ok();
                     }
                 }
             }
@@ -108,7 +108,8 @@ impl Converter<'_> {
         } else {
             let p = filename.strip_prefix("file://").unwrap_or(filename);
             let p = if Path::new(p).is_absolute() { PathBuf::from(p) } else { self.base.join(p) };
-            p.exists().then_some(p)
+            // absolute, so the generated MJCF is independent of where it is loaded from
+            std::fs::canonicalize(&p).ok()
         }
     }
 

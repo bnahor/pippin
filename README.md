@@ -46,6 +46,50 @@ Physics backends only export a static scene (shapes, meshes, cameras) and
 per-environment poses. Renderers consume only those, so any physics engine
 works with any renderer.
 
+## Procedural scenes and domain randomization
+
+`pippin.scene` builds tabletop scenes from robots (URDF or MJCF), furniture,
+and pools of randomized objects (boxes, cylinders, spheres, meshes). The same
+model is shared by every environment, so batching stays fast. Each
+environment still gets its own:
+
+- object set
+- sizes
+- masses and inertias
+- frictions
+- colors
+- non-overlapping start layout
+
+Everything derives from a seed and is reproducible.
+
+```python
+from pippin.scene import SceneBuilder, Box, Cylinder, Sphere, Mesh
+
+sb = SceneBuilder()
+sb.floor()
+top = sb.table(size=(0.45, 0.35), height=0.4)
+sb.robot("assets/urdf/arm.urdf", pos=(-0.38, 0.0, top))
+sb.objects([Box(size=((0.015, 0.035),) * 3), Cylinder(radius=(0.015, 0.03), half_height=(0.02, 0.05)),
+            Sphere(radius=(0.015, 0.035)), Mesh("assets/urdf/meshes/wedge.obj")],
+           count=(2, 6), region=((-0.15, 0.4), (-0.3, 0.3)), surface=top)
+plan = sb.build(num_envs=4096, seed=0)
+env = pippin.AsyncEnv(plan.xml, 4096, render=dict(width=128, height=128))
+plan.apply(env)   # per-env parameters + initial states; reset() returns to them
+```
+
+Lower-level per-environment parameters are available directly, for example
+`env.set_param("geom_friction", geom_id, values)`. The available parameters
+are:
+
+- geom friction, size, color, and collision masks
+- body mass, inertia, and center of mass
+- joint damping
+- actuator gain and bias
+- per-environment initial state (`qpos0`)
+
+Robots load from **URDF** (validated against MuJoCo's own URDF import) or
+MJCF. **Meshes** (STL, OBJ) collide through their convex hull.
+
 ## End-to-end results (M5 Pro: 6 Super + 12 Performance cores)
 
 Ant, 2048 envs, 64×64 RGB rendered for every action, 4 physics substeps per
@@ -145,15 +189,17 @@ Benchmark: `python benches/bench_cpu.py`.
 
 1. ~~Newton constraint solver~~ (matches MuJoCo through contact)
 2. ~~Decoupled physics/rendering, async pipeline, batched Metal renderer~~
-3. **ovrtx renderer backend** for photorealistic RTX rendering on NVIDIA
+3. ~~Meshes, URDF, per-environment randomization, procedural scenes~~
+4. **ovrtx renderer backend** for photorealistic RTX rendering on NVIDIA
    hardware (Linux).
-4. **CPU performance on Apple Silicon.** NEON SIMD across environments,
+5. **CPU performance on Apple Silicon.** NEON SIMD across environments,
    thread QoS for the two core tiers, and `target-cpu` tuning.
-5. **Meshes and assets.** Convex-hull collision (GJK/EPA), URDF, and
-   YCB-style objects.
-6. **Manipulation essentials.** Elliptic cones, torsional friction, equality
+6. **Asset library.** YCB and Objaverse object sets, and textures. Also
+   non-convex meshes via convex decomposition, since meshes currently use a
+   single convex hull.
+7. **Manipulation essentials.** Elliptic cones, torsional friction, equality
    constraints, tendons, and sensors.
-7. **Zero-copy handoff to PyTorch-MPS and MLX tensors,** plus a Gymnasium
+8. **Zero-copy handoff to PyTorch-MPS and MLX tensors,** plus a Gymnasium
    wrapper and a ManiSkill-style task suite.
 
 ## Layout
