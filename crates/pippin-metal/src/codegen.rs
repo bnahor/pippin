@@ -147,6 +147,36 @@ pub fn header(m: &Model, lim: Limits) -> String {
     array(&mut s, "float", "jnt_stiffness", &m.jnt_stiffness, |x| f(*x), "0");
     array(&mut s, "float", "jnt_springref", &m.jnt_springref, |x| f(*x), "0");
 
+    // ancestor tables (self first), padded with -1: fixed trip counts let the
+    // compiler fully unroll tree walks and keep per-thread arrays in registers
+    let chain = |mut k: usize| {
+        let mut v = vec![];
+        while k != usize::MAX {
+            v.push(k);
+            k = m.dof_parent[k];
+        }
+        v
+    };
+    let dof_chains: Vec<Vec<usize>> = (0..m.nv).map(chain).collect();
+    let body_chains: Vec<Vec<usize>> = (0..m.nbody()).map(|b| chain(m.body_lastdof[b])).collect();
+    let depth = dof_chains.iter().chain(body_chains.iter()).map(Vec::len).max().unwrap_or(1).max(1);
+    writeln!(s, "#define MAXDEPTH {depth}").unwrap();
+    let table = |chains: &[Vec<usize>]| -> Vec<String> {
+        chains
+            .iter()
+            .map(|c| {
+                let mut v: Vec<String> = c.iter().map(|x| x.to_string()).collect();
+                v.resize(depth, "-1".into());
+                format!("{{{}}}", v.join(", "))
+            })
+            .collect()
+    };
+    array(&mut s, "int", "dof_depth", &dof_chains, |c| c.len().to_string(), "0");
+    let t = table(&dof_chains);
+    writeln!(s, "constant int dof_anc[{}][MAXDEPTH] = {{{}}};", t.len().max(1), if t.is_empty() { "{-1}".into() } else { t.join(", ") }).unwrap();
+    array(&mut s, "int", "body_depth", &body_chains, |c| c.len().to_string(), "0");
+    let t = table(&body_chains);
+    writeln!(s, "constant int body_anc[{}][MAXDEPTH] = {{{}}};", t.len(), t.join(", ")).unwrap();
     array(&mut s, "int", "dof_body", &m.dof_body, i, "0");
     array(&mut s, "int", "dof_parent", &m.dof_parent, |x| idx(*x), "-1");
     array(&mut s, "float", "dof_damping", &m.dof_damping, |x| f(*x), "0");

@@ -76,15 +76,21 @@ impl MetalSim {
     }
 
     pub fn with_limits(model: Model, n: usize, limits: Limits) -> Result<MetalSim, MetalError> {
+        let src = codegen::source(&model, limits);
+        Self::with_source(model, n, limits, &src)
+    }
+
+    /// Build from explicit Metal source (for profiling experiments).
+    #[doc(hidden)]
+    pub fn with_source(model: Model, n: usize, limits: Limits, src: &str) -> Result<MetalSim, MetalError> {
         if model.nv == 0 {
             return Err(MetalError::Unsupported("model has no degrees of freedom".into()));
         }
         let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::NoDevice)?;
-        let src = codegen::source(&model, limits);
         let opts = MTLCompileOptions::new();
         opts.setMathMode(MTLMathMode::Safe);
         let lib = device
-            .newLibraryWithSource_options_error(&NSString::from_str(&src), Some(&opts))
+            .newLibraryWithSource_options_error(&NSString::from_str(src), Some(&opts))
             .map_err(|e| MetalError::Compile(e.localizedDescription().to_string()))?;
         let func = lib
             .newFunctionWithName(&NSString::from_str("step_kernel"))

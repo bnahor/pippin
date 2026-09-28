@@ -9,6 +9,11 @@ using namespace metal;
 
 // PIPPIN_MODEL
 
+#ifndef ABLATE
+#define ABLATE 0
+#endif
+#define STAGE(k, expr) if (ABLATE == k) { v[0] += 1e-30f * (expr); return; }
+
 #define JNT_FREE 0
 #define JNT_BALL 1
 #define JNT_SLIDE 2
@@ -509,10 +514,10 @@ inline float impedance(float pos) {
 }
 
 inline void point_jac(thread const Sp* cdof, int body, float3 p, float3 dir, float sgn, thread float* row) {
-    int k = body_lastdof[body];
-    while (k >= 0) {
+    for (int t = 0; t < MAXDEPTH; t++) {
+        if (t >= body_depth[body]) break;
+        int k = body_anc[body][t];
         row[k] += sgn * dot(dir, point_vel(cdof[k], p));
-        k = dof_parent[k];
     }
 }
 
@@ -640,10 +645,12 @@ inline void step_one(thread float* q, thread float* v, thread const float* u, th
     xmat[0] = mat_identity();
     xipos[0] = float3(0);
     cinert[0] = si_zero();
+    #pragma unroll
     for (int b = 1; b < NBODY; b++) {
         int p = body_parent[b];
         float3 pos = xpos[p] + xmat[p] * body_pos[b];
         float4 quat = qmul(xquat[p], body_quat[b]);
+        #pragma unroll
         for (int j = body_jntadr[b]; j < body_jntadr[b] + body_jntnum[b]; j++) {
             int qa = jnt_qposadr[j], da = jnt_dofadr[j];
             int t = jnt_type[j];
@@ -684,33 +691,40 @@ inline void step_one(thread float* q, thread float* v, thread const float* u, th
         cinert[b] = si_from_com(body_mass[b], xipos[b], xmat[b] * body_inertia[b] * transpose(xmat[b]));
     }
 
+    { float cs = 0; for (int i = 0; i < NBODY; i++) cs += xpos[i].x + cinert[i].m + cinert[i].io[0][0]; for (int i = 0; i < NV; i++) cs += cdof[i].a.x + cdof[i].l.y; STAGE(1, cs) }
     // ---- mass matrix (CRBA) ----
     float M[NV * NV];
     {
         SI crb[NBODY];
         for (int b = 0; b < NBODY; b++) crb[b] = cinert[b];
+        #pragma unroll
         for (int b = NBODY - 1; b > 0; b--) crb[body_parent[b]] = si_add(crb[body_parent[b]], crb[b]);
         for (int i = 0; i < NV * NV; i++) M[i] = 0;
+        #pragma unroll
         for (int i = 0; i < NV; i++) {
             Sp f = si_mul(crb[dof_body[i]], cdof[i]);
-            int j = i;
-            while (j >= 0) {
+            #pragma unroll
+            for (int t = 0; t < MAXDEPTH; t++) {
+                if (t >= dof_depth[i]) break;
+                int j = dof_anc[i][t];
                 float val = sp_dot(cdof[j], f);
                 M[i * NV + j] = val;
                 M[j * NV + i] = val;
-                j = dof_parent[j];
             }
             M[i * NV + i] += dof_armature[i];
         }
     }
 
+    { float cs = 0; for (int i = 0; i < NV * NV; i++) cs += M[i]; STAGE(2, cs) }
     // ---- velocities and bias forces (RNE) ----
     float f[NV];
     {
         Sp cvel[NBODY], cdofdot[NV];
         cvel[0] = sp_zero();
+        #pragma unroll
         for (int b = 1; b < NBODY; b++) {
             Sp vb = cvel[body_parent[b]];
+            #pragma unroll
             for (int j = body_jntadr[b]; j < body_jntadr[b] + body_jntnum[b]; j++) {
                 int da = jnt_dofadr[j], t = jnt_type[j];
                 if (t == JNT_FREE || t == JNT_BALL) {
@@ -732,6 +746,7 @@ inline void step_one(thread float* q, thread float* v, thread const float* u, th
         Sp cacc[NBODY], cfrc[NBODY];
         cacc[0] = sp(float3(0), -GRAVITY);
         cfrc[0] = sp_zero();
+        #pragma unroll
         for (int b = 1; b < NBODY; b++) {
             Sp ab = cacc[body_parent[b]];
             for (int k = body_dofadr[b]; k < body_dofadr[b] + body_dofnum[b]; k++) ab = sp_add(ab, sp_scale(cdofdot[k], v[k]));
@@ -739,6 +754,7 @@ inline void step_one(thread float* q, thread float* v, thread const float* u, th
             Sp hb = si_mul(cinert[b], cvel[b]);
             cfrc[b] = sp_add(si_mul(cinert[b], ab), cross_force(cvel[b], hb));
         }
+        #pragma unroll
         for (int b = NBODY - 1; b > 0; b--) cfrc[body_parent[b]] = sp_add(cfrc[body_parent[b]], cfrc[b]);
 
         // smooth force = passive + actuator - bias
@@ -759,6 +775,7 @@ inline void step_one(thread float* q, thread float* v, thread const float* u, th
         }
     }
 
+    { float cs = 0; for (int i = 0; i < NV; i++) cs += f[i]; for (int i = 0; i < NV * NV; i++) cs += M[i]; STAGE(3, cs) }
     // ---- unconstrained acceleration ----
     float L[NV * NV];
     float a[NV];
@@ -767,6 +784,7 @@ inline void step_one(thread float* q, thread float* v, thread const float* u, th
     for (int k = 0; k < NV; k++) a[k] = f[k];
     cholesky_solve<NV>(L, a);
 
+    { float cs = 0; for (int i = 0; i < NV; i++) cs += a[i]; for (int i = 0; i < NV * NV; i++) cs += M[i]; STAGE(4, cs) }
     // ---- collision ----
     Contact con[MAXCON];
     int ncon = 0;
@@ -792,6 +810,7 @@ inline void step_one(thread float* q, thread float* v, thread const float* u, th
         }
     }
 
+    { float cs = 0; for (int i = 0; i < NV; i++) cs += a[i]; for (int i = 0; i < NV * NV; i++) cs += M[i]; for (int i = 0; i < ncon; i++) cs += con[i].depth + con[i].pos.x + con[i].n.y; STAGE(5, cs) }
     // ---- constraint rows ----
     float jac[MAXROWS * NV];
     float aref[MAXROWS], D[MAXROWS];
@@ -850,10 +869,12 @@ inline void step_one(thread float* q, thread float* v, thread const float* u, th
         }
     }
 
+    { float cs = 0; for (int i = 0; i < NV; i++) cs += a[i]; for (int i = 0; i < NV * NV; i++) cs += M[i]; for (int r = 0; r < nr; r++) { cs += aref[r] + D[r]; for (int k = 0; k < NV; k++) cs += jac[r * NV + k]; } STAGE(6, cs) }
     // ---- solve, implicit damping, integrate ----
     float qfrc_c[NV];
     for (int k = 0; k < NV; k++) qfrc_c[k] = 0;
     if (nr > 0) newton_solve(M, jac, aref, D, nr, a, awarm, qfrc_c);
+    { float cs = 0; for (int i = 0; i < NV; i++) cs += a[i] + qfrc_c[i] + f[i]; for (int i = 0; i < NV * NV; i++) cs += M[i]; STAGE(7, cs) }
     if (DAMPED) {
         for (int i = 0; i < NV * NV; i++) L[i] = M[i];
         for (int k = 0; k < NV; k++) L[k * NV + k] += TIMESTEP * dof_damping[k];
