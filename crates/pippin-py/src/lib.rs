@@ -65,6 +65,22 @@ impl PySim {
         py.detach(|| b.step(nstep));
     }
 
+    /// Open-loop rollout of `ctrl` shaped (num_envs, nstep, nu), starting from the
+    /// current state. Returns qpos after every step, shaped (num_envs, nstep, nq).
+    fn rollout<'py>(&mut self, py: Python<'py>, ctrl: numpy::PyReadonlyArray3<f64>) -> PyResult<Bound<'py, numpy::PyArray3<f64>>> {
+        let shape = ctrl.shape().to_vec();
+        let (n, nu, nq) = (self.batch.len(), self.batch.model.nu, self.batch.model.nq);
+        if shape[0] != n || shape[2] != nu {
+            return Err(PyValueError::new_err(format!("expected ctrl shape ({n}, T, {nu}), got {shape:?}")));
+        }
+        let nstep = shape[1];
+        let c = ctrl.as_slice().map_err(|e| PyValueError::new_err(e.to_string()))?.to_vec();
+        let mut out = vec![0.0; n * nstep * nq];
+        let b = &mut self.batch;
+        py.detach(|| b.rollout(&c, nstep, &mut out));
+        PyArray1::from_vec(py, out).reshape([n, nstep, nq])
+    }
+
     fn forward(&mut self, py: Python<'_>) {
         let b = &mut self.batch;
         py.detach(|| b.forward());
@@ -114,6 +130,16 @@ impl PySim {
     /// Model-level mass properties (body_mass, body_inertia_com) for validation.
     fn body_mass(&self) -> Vec<f64> {
         self.batch.model.body_mass.clone()
+    }
+
+    /// Per-body (translational, rotational) inverse inertia at qpos0.
+    fn body_invweight(&self) -> Vec<[f64; 2]> {
+        self.batch.model.body_invweight.clone()
+    }
+
+    /// Per-dof inverse inertia at qpos0.
+    fn dof_invweight(&self) -> Vec<f64> {
+        self.batch.model.dof_invweight.clone()
     }
 
     /// Joint-space inertia of env 0 after forward().

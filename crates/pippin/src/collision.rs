@@ -10,6 +10,8 @@ use crate::model::GeomType;
 pub struct Contact {
     pub pos: Vec3,
     pub normal: Vec3,
+    /// Preferred first friction direction (zero = derive from the normal).
+    pub tangent: Vec3,
     pub depth: Real,
     pub geom: [usize; 2],
     /// Stable per-pair index used to match contacts across steps (warm start).
@@ -30,6 +32,27 @@ pub struct Hit {
     pub pos: Vec3,
     pub normal: Vec3,
     pub depth: Real,
+    /// Preferred first friction direction (zero = derive from the normal).
+    pub tangent: Vec3,
+}
+
+impl Hit {
+    fn new(pos: Vec3, normal: Vec3, depth: Real) -> Hit {
+        Hit { pos, normal, depth, tangent: Vec3::ZERO }
+    }
+}
+
+impl Contact {
+    /// Orthonormal friction directions, honoring a preferred tangent if set.
+    pub fn frame(&self) -> (Vec3, Vec3) {
+        let t = self.tangent - self.normal * self.normal.dot(self.tangent);
+        if t.norm2() > 1e-12 {
+            let t1 = t.normalized();
+            (t1, self.normal.cross(t1))
+        } else {
+            self.normal.tangents()
+        }
+    }
 }
 
 /// Collide two geoms; pushes hits (normal from `a` to `b`) into `out`.
@@ -48,8 +71,13 @@ pub fn collide(a: &GeomPose, b: &GeomPose, margin: Real, out: &mut Vec<Hit>) {
         (Plane, Sphere) => plane_sphere(a, b.pos, b.size[0], margin, out),
         (Plane, Capsule) => {
             let (p0, p1) = segment(b);
+            let start = out.len();
             plane_sphere(a, p0, b.size[0], margin, out);
             plane_sphere(a, p1, b.size[0], margin, out);
+            // friction frame aligned with the capsule axis (as MuJoCo does)
+            for h in &mut out[start..] {
+                h.tangent = b.mat.col(2);
+            }
         }
         (Plane, Box) => plane_box(a, b, margin, out),
         (Plane, Cylinder) => plane_cylinder(a, b, margin, out),
@@ -139,7 +167,7 @@ fn plane_sphere(plane: &GeomPose, c: Vec3, r: Real, margin: Real, out: &mut Vec<
     if depth > -margin {
         // midpoint between sphere surface and plane
         let pos = c - n * (dist + r) * 0.5;
-        out.push(Hit { pos, normal: n, depth });
+        out.push(Hit::new(pos, n, depth));
     }
 }
 
@@ -163,7 +191,7 @@ fn plane_box(plane: &GeomPose, b: &GeomPose, margin: Real, out: &mut Vec<Hit>) {
     let hits = &mut hits[..k];
     hits.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
     for &(dist, corner) in hits.iter().take(4) {
-        out.push(Hit { pos: corner - n * (dist * 0.5), normal: n, depth: -dist });
+        out.push(Hit::new(corner - n * (dist * 0.5), n, -dist));
     }
 }
 
@@ -194,7 +222,7 @@ fn plane_cylinder(plane: &GeomPose, c: &GeomPose, margin: Real, out: &mut Vec<Hi
         .collect();
     hits.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
     for &(dist, p) in hits.iter().take(4) {
-        out.push(Hit { pos: p - n * (dist * 0.5), normal: n, depth: -dist });
+        out.push(Hit::new(p - n * (dist * 0.5), n, -dist));
     }
 }
 
@@ -207,7 +235,7 @@ fn sphere_sphere(c1: Vec3, r1: Real, c2: Vec3, r2: Real, margin: Real, out: &mut
     }
     let n = if dist > 1e-12 { d * (1.0 / dist) } else { Vec3::Z };
     let pos = c1 + n * (r1 - depth * 0.5);
-    out.push(Hit { pos, normal: n, depth });
+    out.push(Hit::new(pos, n, depth));
 }
 
 /// Sphere vs box. Normal points from sphere to box.
@@ -226,7 +254,7 @@ fn sphere_box(c: Vec3, r: Real, b: &GeomPose, margin: Real, out: &mut Vec<Hit>) 
         let n_local = diff * (-1.0 / dist);
         let n = b.mat.mul_vec(n_local);
         let surf = b.pos + b.mat.mul_vec(clamped);
-        out.push(Hit { pos: surf - n * (depth * 0.5), normal: n, depth });
+        out.push(Hit::new(surf - n * (depth * 0.5), n, depth));
     } else {
         // center inside the box: push out through the nearest face
         let mut best = (Real::INFINITY, 0, 1.0);
@@ -243,7 +271,7 @@ fn sphere_box(c: Vec3, r: Real, b: &GeomPose, margin: Real, out: &mut Vec<Hit>) 
         nl[i] = -s; // from sphere into box
         let n = b.mat.mul_vec(nl);
         let depth = r + d;
-        out.push(Hit { pos: c + n * (r - depth * 0.5), normal: n, depth });
+        out.push(Hit::new(c + n * (r - depth * 0.5), n, depth));
     }
 }
 
@@ -375,7 +403,7 @@ fn box_box(a: &GeomPose, b: &GeomPose, margin: Real, out: &mut Vec<Hit>) {
             pb - bx[j] * b.size[j],
             pb + bx[j] * b.size[j],
         );
-        out.push(Hit { pos: (x + y) * 0.5, normal: n, depth: overlap });
+        out.push(Hit::new((x + y) * 0.5, n, overlap));
         return;
     }
 
@@ -420,7 +448,7 @@ fn box_box(a: &GeomPose, b: &GeomPose, margin: Real, out: &mut Vec<Hit>) {
         .collect();
     reduce_to_four(&mut pts);
     for (sep, p) in pts {
-        out.push(Hit { pos: p - nref * (sep * 0.5), normal: n, depth: -sep });
+        out.push(Hit::new(p - nref * (sep * 0.5), n, -sep));
     }
 }
 

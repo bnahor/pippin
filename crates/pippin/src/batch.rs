@@ -39,6 +39,24 @@ impl Batch {
         });
     }
 
+    /// Open-loop rollout: `ctrl` is (envs, nstep, nu) row-major; writes the
+    /// qpos after every step into `qpos_out`, shaped (envs, nstep, nq). Each
+    /// environment runs all its steps without synchronizing with the others.
+    pub fn rollout(&mut self, ctrl: &[Real], nstep: usize, qpos_out: &mut [Real]) {
+        let (nu, nq, n) = (self.model.nu, self.model.nq, self.len());
+        assert_eq!(ctrl.len(), n * nstep * nu, "ctrl has the wrong size");
+        assert_eq!(qpos_out.len(), n * nstep * nq, "qpos_out has the wrong size");
+        let m = &self.model;
+        self.envs.par_iter_mut().zip(qpos_out.par_chunks_mut(nstep * nq)).enumerate().for_each(|(i, (d, out))| {
+            let c = &ctrl[i * nstep * nu..(i + 1) * nstep * nu];
+            for t in 0..nstep {
+                d.ctrl.copy_from_slice(&c[t * nu..(t + 1) * nu]);
+                forward::step(m, d);
+                out[t * nq..(t + 1) * nq].copy_from_slice(&d.qpos);
+            }
+        });
+    }
+
     /// Recompute derived quantities (poses, contacts) without advancing time.
     pub fn forward(&mut self) {
         let m = &self.model;
@@ -61,6 +79,9 @@ impl Batch {
     pub fn get(&self, field: Field, out: &mut [Real]) {
         let w = field.width(&self.model);
         assert_eq!(out.len(), w * self.len(), "output buffer has the wrong size");
+        if w == 0 {
+            return;
+        }
         for (d, o) in self.envs.iter().zip(out.chunks_mut(w)) {
             o.copy_from_slice(field.slice(d));
         }
@@ -69,6 +90,9 @@ impl Batch {
     pub fn set(&mut self, field: Field, src: &[Real]) {
         let w = field.width(&self.model);
         assert_eq!(src.len(), w * self.len(), "input buffer has the wrong size");
+        if w == 0 {
+            return;
+        }
         for (d, s) in self.envs.iter_mut().zip(src.chunks(w)) {
             field.slice_mut(d).copy_from_slice(s);
         }

@@ -8,7 +8,7 @@ use std::path::Path;
 use roxmltree::{Document, Node};
 
 use crate::math::{Mat3, Quat, Real, Vec3};
-use crate::model::{GeomType, Integrator, JointType, Model, SolverOptions};
+use crate::model::{GeomType, Integrator, JointType, Model, SolverKind, SolverOptions};
 
 #[derive(Debug, thiserror::Error)]
 pub enum MjcfError {
@@ -207,6 +207,31 @@ pub fn load_str(xml: &str) -> Result<Model, MjcfError> {
             let g = parse_floats(v)?;
             m.gravity = Vec3::new(g[0], g[1], g[2]);
         }
+        if let Some(v) = o.attribute("solver") {
+            m.solver.kind = match v {
+                "Newton" => SolverKind::Newton,
+                "PGS" => SolverKind::Pgs,
+                other => {
+                    ctx.warnings.push(format!("solver '{other}' not supported, using Newton"));
+                    SolverKind::Newton
+                }
+            };
+        }
+        if let Some(v) = o.attribute("impratio") {
+            m.solver.impratio = parse_floats(v)?[0];
+        }
+        if let Some(v) = o.attribute("cone") {
+            if v != "pyramidal" {
+                ctx.warnings.push(format!("cone '{v}' not supported, using pyramidal"));
+            }
+        }
+        if let Some(v) = o.attribute("tolerance") {
+            m.solver.tolerance = parse_floats(v)?[0];
+        }
+        if let Some(v) = o.attribute("o_solref") {
+            let r = parse_floats(v)?;
+            m.solver.solref = [r[0], r[1]];
+        }
         if let Some(v) = o.attribute("iterations") {
             m.solver.iterations = parse_floats(v)?[0] as usize;
         }
@@ -247,6 +272,7 @@ pub fn load_str(xml: &str) -> Result<Model, MjcfError> {
 
     let mut m = b.m;
     m.compile();
+    crate::forward::set_const(&mut m);
     Ok(m)
 }
 
@@ -324,6 +350,8 @@ fn empty_model() -> Model {
         actuator_ctrlrange: vec![],
         actuator_forcelimited: vec![],
         actuator_forcerange: vec![],
+        body_invweight: vec![],
+        dof_invweight: vec![],
         qpos0: vec![],
         collision_pairs: vec![],
     }

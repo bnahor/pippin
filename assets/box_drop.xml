@@ -1,0 +1,9 @@
+<mujoco model="box_drop">
+  <option timestep="0.002"/>
+  <worldbody>
+    <geom type="plane" size="5 5 .1"/>
+    <body pos="0 0 0.3" euler="10 20 5"><freejoint/><geom type="box" size=".05 .05 .05"/></body>
+    <body pos="0.3 0 0.2"><freejoint/><geom type="sphere" size=".04"/></body>
+    <body pos="-0.3 0 0.2" euler="0 80 30"><freejoint/><geom type="capsule" size=".03 .08"/></body>
+  </worldbody>
+</mujoco>

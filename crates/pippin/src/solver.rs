@@ -10,7 +10,7 @@
 use std::f64::consts::PI;
 
 use crate::data::Data;
-use crate::math::{cholesky_solve, Real, Vec3};
+use crate::math::{cholesky_solve, Real, Spatial, Vec3};
 use crate::model::{JointType, Model};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -30,6 +30,8 @@ pub struct Row {
 }
 
 const MAX_BIAS_VELOCITY: Real = 1.0;
+/// Stop once no row changes its constraint velocity by more than this (m/s).
+const TOLERANCE: Real = 1e-5;
 
 struct Soft {
     bias_rate: Real,
@@ -46,10 +48,10 @@ fn soft(hertz: Real, zeta: Real, h: Real) -> Soft {
 }
 
 /// Accumulate the Jacobian of a world point on `body` along `dir` into `row`.
-fn point_jac(m: &Model, d: &Data, body: usize, p: Vec3, dir: Vec3, sign: Real, row: &mut [Real]) {
+pub(crate) fn point_jac(m: &Model, cdof: &[Spatial], body: usize, p: Vec3, dir: Vec3, sign: Real, row: &mut [Real]) {
     let mut k = m.body_lastdof[body];
     while k != usize::MAX {
-        row[k] += sign * dir.dot(d.cdof[k].point_velocity(p));
+        row[k] += sign * dir.dot(cdof[k].point_velocity(p));
         k = m.dof_parent[k];
     }
 }
@@ -76,13 +78,13 @@ pub fn solve(m: &Model, d: &mut Data, v: &mut [Real], v_pos: &mut Vec<Real>) {
         let (g1, g2) = (c.geom[0], c.geom[1]);
         let (b1, b2) = (m.geom_body[g1], m.geom_body[g2]);
         let mu = m.geom_friction[g1].max(m.geom_friction[g2]);
-        let (t1, t2) = c.normal.tangents();
+        let (t1, t2) = c.frame();
         let base = rows.len();
         for (r, dir) in [c.normal, t1, t2].into_iter().enumerate() {
             let idx = push_row(&mut jac);
             let row = &mut jac[idx * nv..(idx + 1) * nv];
-            point_jac(m, d, b2, c.pos, dir, 1.0, row);
-            point_jac(m, d, b1, c.pos, dir, -1.0, row);
+            point_jac(m, &d.cdof, b2, c.pos, dir, 1.0, row);
+            point_jac(m, &d.cdof, b1, c.pos, dir, -1.0, row);
             let kind = if r == 0 { RowKind::Normal { sep: -c.depth } } else { RowKind::Friction { normal: base, mu } };
             rows.push(Row { kind, inv_a: 0.0, contact: ci });
         }
@@ -183,13 +185,13 @@ pub fn solve(m: &Model, d: &mut Data, v: &mut [Real], v_pos: &mut Vec<Real>) {
         max_dv
     };
     for _ in 0..opt.iterations {
-        if iterate(v, &mut lambda, true) < opt.tolerance {
+        if iterate(v, &mut lambda, true) < TOLERANCE {
             break;
         }
     }
     v_pos.copy_from_slice(v);
     for _ in 0..(opt.iterations / 3).max(2) {
-        if iterate(v, &mut lambda, false) < opt.tolerance {
+        if iterate(v, &mut lambda, false) < TOLERANCE {
             break;
         }
     }
@@ -249,8 +251,8 @@ fn warm_start(d: &Data, rows: &[Row], lambda: &mut [Real]) {
         if best.1 != usize::MAX {
             let p = &prev[best.1];
             let l = d.scratch.prev_lambda[best.1];
-            let (pt1, pt2) = p.normal.tangents();
-            let (t1, t2) = c.normal.tangents();
+            let (pt1, pt2) = p.frame();
+            let (t1, t2) = c.frame();
             let f = pt1 * l[1] + pt2 * l[2];
             lambda[r] = l[0];
             lambda[r + 1] = f.dot(t1);

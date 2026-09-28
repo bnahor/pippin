@@ -7,8 +7,8 @@
 use crate::collision::{self, Contact, GeomPose, Hit};
 use crate::data::Data;
 use crate::math::{cholesky, cholesky_solve, Mat3, Quat, Real, Spatial, SpatialInertia, Vec3};
-use crate::model::{JointType, Model};
-use crate::solver;
+use crate::model::{JointType, Model, SolverKind};
+use crate::{newton, solver};
 
 /// Positions of bodies, joint frames, geoms, and dof motion subspaces.
 pub fn kinematics(m: &Model, d: &mut Data) {
@@ -220,7 +220,14 @@ pub fn collide(m: &Model, d: &mut Data) {
         hits.clear();
         collision::collide(&pose(g1), &pose(g2), margin, &mut hits);
         for (i, h) in hits.iter().enumerate() {
-            d.contacts.push(Contact { pos: h.pos, normal: h.normal, depth: h.depth, geom: [g1, g2], feature: i as u32 });
+            d.contacts.push(Contact {
+                pos: h.pos,
+                normal: h.normal,
+                tangent: h.tangent,
+                depth: h.depth,
+                geom: [g1, g2],
+                feature: i as u32,
+            });
         }
     }
     d.scratch.hits = hits;
@@ -237,35 +244,113 @@ pub fn forward(m: &Model, d: &mut Data) {
     collide(m, d);
 }
 
+/// Compute model constants that depend on the reference configuration:
+/// per-body and per-dof inverse inertia (MuJoCo's `invweight0`).
+pub fn set_const(m: &mut Model) {
+    let mut d = Data::new(m);
+    kinematics(m, &mut d);
+    crba(m, &mut d);
+    let nv = m.nv;
+    m.dof_invweight = vec![0.0; nv];
+    m.body_invweight = vec![[0.0; 2]; m.nbody()];
+    if nv == 0 {
+        return;
+    }
+    let mut l = d.qm.clone();
+    if !cholesky(&mut l, nv) {
+        return;
+    }
+    let quad = |row: &[Real], x: &mut [Real]| -> Real {
+        x.copy_from_slice(row);
+        cholesky_solve(&l, nv, x);
+        row.iter().zip(x.iter()).map(|(a, b)| a * b).sum()
+    };
+    let mut x = vec![0.0; nv];
+    let mut e = vec![0.0; nv];
+    for k in 0..nv {
+        e.fill(0.0);
+        e[k] = 1.0;
+        m.dof_invweight[k] = quad(&e, &mut x);
+    }
+    // multi-dof joints share one averaged value per translational/rotational group
+    for j in 0..m.njnt() {
+        let da = m.jnt_dofadr[j];
+        let groups: &[usize] = match m.jnt_type[j] {
+            JointType::Free => &[0, 3],
+            JointType::Ball => &[0],
+            _ => continue,
+        };
+        for &g in groups {
+            let avg = (0..3).map(|i| m.dof_invweight[da + g + i]).sum::<Real>() / 3.0;
+            (0..3).for_each(|i| m.dof_invweight[da + g + i] = avg);
+        }
+    }
+    let mut row = vec![0.0; nv];
+    for b in 1..m.nbody() {
+        let mut w = [0.0; 2];
+        for axis in 0..3 {
+            let mut dir = Vec3::ZERO;
+            dir[axis] = 1.0;
+            for (kind, slot) in w.iter_mut().enumerate() {
+                row.fill(0.0);
+                let mut k = m.body_lastdof[b];
+                while k != usize::MAX {
+                    let c = &d.cdof[k];
+                    row[k] = if kind == 0 { dir.dot(c.point_velocity(d.xipos[b])) } else { dir.dot(c.ang) };
+                    k = m.dof_parent[k];
+                }
+                *slot += quad(&row, &mut x) / 3.0;
+            }
+        }
+        m.body_invweight[b] = w;
+    }
+}
+
 /// Advance the simulation by one timestep.
 pub fn step(m: &Model, d: &mut Data) {
     forward(m, d);
     let nv = m.nv;
     let h = m.timestep;
 
-    // M_hat = M + h * D  (implicit joint damping, as in MuJoCo's Euler)
-    d.qm_chol.copy_from_slice(&d.qm);
-    for k in 0..nv {
-        d.qm_chol[k * nv + k] += h * m.dof_damping[k];
-    }
-    if !cholesky(&mut d.qm_chol, nv) {
-        panic!("mass matrix is not positive definite");
-    }
-
-    // unconstrained velocity update
+    let damped = m.dof_damping.iter().any(|&b| b != 0.0);
+    let mut smooth = std::mem::take(&mut d.scratch.smooth);
+    smooth.clear();
+    smooth.extend((0..nv).map(|k| d.qfrc_passive[k] + d.qfrc_actuator[k] + d.qfrc_applied[k] - d.qfrc_bias[k]));
     let mut acc = std::mem::take(&mut d.scratch.tmp_nv);
-    acc.resize(nv, 0.0);
-    for k in 0..nv {
-        acc[k] = d.qfrc_passive[k] + d.qfrc_actuator[k] + d.qfrc_applied[k] - d.qfrc_bias[k];
-    }
-    cholesky_solve(&d.qm_chol, nv, &mut acc);
-    let mut v = std::mem::take(&mut d.scratch.v);
-    v.clear();
-    v.extend((0..nv).map(|k| d.qvel[k] + h * acc[k]));
-    d.scratch.tmp_nv = acc;
+    acc.clear();
+    acc.extend_from_slice(&smooth);
 
+    let mut v = std::mem::take(&mut d.scratch.v);
     let mut v_pos = std::mem::take(&mut d.scratch.v_pos);
-    solver::solve(m, d, &mut v, &mut v_pos);
+    v.clear();
+    match m.solver.kind {
+        SolverKind::Newton => {
+            // As in MuJoCo: solve constraints with M, then apply implicit
+            // damping: qacc = (M + hD)^-1 (qfrc_smooth + qfrc_constraint).
+            factor_mass(m, d, 0.0);
+            cholesky_solve(&d.qm_chol, nv, &mut acc);
+            newton::solve(m, d, &mut acc);
+            if damped {
+                factor_mass(m, d, h);
+                for k in 0..nv {
+                    acc[k] = smooth[k] + d.qfrc_constraint[k];
+                }
+                cholesky_solve(&d.qm_chol, nv, &mut acc);
+            }
+            v.extend((0..nv).map(|k| d.qvel[k] + h * acc[k]));
+            v_pos.clear();
+            v_pos.extend_from_slice(&v);
+        }
+        SolverKind::Pgs => {
+            // PGS works on velocities with the damped inertia throughout
+            factor_mass(m, d, h);
+            cholesky_solve(&d.qm_chol, nv, &mut acc);
+            v.extend((0..nv).map(|k| d.qvel[k] + h * acc[k]));
+            solver::solve(m, d, &mut v, &mut v_pos);
+        }
+    }
+    d.scratch.tmp_nv = acc;
+    d.scratch.smooth = smooth;
 
     for k in 0..nv {
         d.qacc[k] = (v[k] - d.qvel[k]) / h;
@@ -275,6 +360,18 @@ pub fn step(m: &Model, d: &mut Data) {
     d.scratch.v = v;
     d.scratch.v_pos = v_pos;
     d.time += h;
+}
+
+/// Factor M + h*D (damping-implicit inertia) into `d.qm_chol`.
+fn factor_mass(m: &Model, d: &mut Data, h: Real) {
+    let nv = m.nv;
+    d.qm_chol.copy_from_slice(&d.qm);
+    for k in 0..nv {
+        d.qm_chol[k * nv + k] += h * m.dof_damping[k];
+    }
+    if !cholesky(&mut d.qm_chol, nv) {
+        panic!("mass matrix is not positive definite");
+    }
 }
 
 /// qpos <- qpos (+) h * qvel on the configuration manifold.

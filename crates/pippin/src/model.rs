@@ -43,30 +43,53 @@ pub enum Integrator {
     Euler,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SolverKind {
+    /// Convex primal Newton over accelerations with pyramidal friction cones.
+    Newton,
+    /// Soft projected Gauss-Seidel on velocities with split-impulse relaxation.
+    Pgs,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SolverOptions {
+    pub kind: SolverKind,
     pub iterations: usize,
-    /// Early exit once no row changes its constraint velocity by more than this.
+    /// PGS: stop once no row changes its constraint velocity by more than this.
+    /// Newton: stop once the relative gradient norm falls below this.
     pub tolerance: Real,
-    /// Natural frequency (Hz-free: rad/s scaled by 1/timestep is applied internally)
-    /// and damping ratio of the soft contact spring, in units of the timestep.
+    /// Contacts are generated this far before geoms touch.
+    pub contact_margin: Real,
+
+    // ---- Newton: MuJoCo-style soft constraint parameters ----
+    /// (timeconst, dampratio) of the constraint reference dynamics.
+    pub solref: [Real; 2],
+    /// (dmin, dmax, width, midpoint, power) of the impedance curve.
+    pub solimp: [Real; 5],
+    /// Ratio of frictional to normal constraint impedance (> 1 reduces slip).
+    pub impratio: Real,
+
+    // ---- PGS ----
+    /// Contact spring frequency in Hz (0 => derived from the timestep).
     pub contact_hertz: Real,
     pub contact_damping_ratio: Real,
     /// Penetration tolerated before the spring engages.
     pub contact_slop: Real,
-    /// Contacts are generated this far before geoms touch.
-    pub contact_margin: Real,
 }
 
 impl Default for SolverOptions {
     fn default() -> Self {
         SolverOptions {
+            kind: SolverKind::Newton,
             iterations: 30,
-            tolerance: 1e-5,
-            contact_hertz: 0.0, // 0 => derived from timestep in compile()
+            tolerance: 1e-8,
+            contact_margin: 1e-3,
+            solref: [0.02, 1.0],
+            solimp: [0.9, 0.95, 0.001, 0.5, 2.0],
+            impratio: 1.0,
+            contact_hertz: 0.0,
             contact_damping_ratio: 1.0,
             contact_slop: 5e-4,
-            contact_margin: 1e-3,
         }
     }
 }
@@ -148,6 +171,12 @@ pub struct Model {
     pub actuator_ctrlrange: Vec<[Real; 2]>,
     pub actuator_forcelimited: Vec<bool>,
     pub actuator_forcerange: Vec<[Real; 2]>,
+
+    /// Inverse inertia at qpos0, (translational, rotational) per body; used to
+    /// scale constraint softness like MuJoCo's `body_invweight0`.
+    pub body_invweight: Vec<[Real; 2]>,
+    /// Inverse joint-space inertia diagonal at qpos0 (MuJoCo `dof_invweight0`).
+    pub dof_invweight: Vec<Real>,
 
     /// Reference configuration.
     pub qpos0: Vec<Real>,

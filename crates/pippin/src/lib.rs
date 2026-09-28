@@ -10,6 +10,7 @@ pub mod forward;
 pub mod math;
 pub mod mjcf;
 pub mod model;
+pub mod newton;
 pub mod solver;
 
 pub use batch::Batch;

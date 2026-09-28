@@ -23,44 +23,56 @@ memory so observations reach PyTorch/MLX without being copied.
 - **Collision.** Plane, sphere, capsule, and box with every pairing, plus
   cylinder against plane. Box-box uses SAT with face clipping for stable
   multi-point manifolds.
-- **Contact solver.** Soft projected Gauss-Seidel with friction, joint limits,
-  warm starting, and split-impulse relaxation.
+- **Constraint solvers.**
+  - *Newton* (the default) is a convex primal Newton solver with pyramidal
+    friction cones and MuJoCo's `solref`/`solimp`/`impratio` soft-constraint
+    model. It uses an exact line search and usually converges in 1-3
+    iterations.
+  - *PGS* is a soft projected Gauss-Seidel solver with warm starting and
+    split-impulse relaxation.
 - **Batched API.** Rust `Batch` and Python `pippin.Sim`, with multithreaded
-  stepping on CPU.
+  stepping and open-loop `rollout()` on CPU.
 
 ## Validation against MuJoCo
 
-`validation/compare_mujoco.py` loads the same MJCF into Pippin and MuJoCo 3.x and compares:
+`validation/compare_mujoco.py` loads the same MJCF into Pippin and MuJoCo 3.x
+and compares the results. Pippin's Newton solver uses the same constraint
+formulation as MuJoCo, so trajectories agree **including through contact**:
 
 | check | result |
 |---|---|
-| body masses | match to 1e-16 |
+| body masses, `invweight0` constants | match to ~1e-15 |
 | joint-space inertia M(q), random states | match to ~1e-16 (relative) |
 | bias forces c(q, q̇), random states | match to ~1e-15 (relative) |
-| 2-second trajectories under random control | match to ~1e-15 |
+| contact-free trajectories (pendulum, cartpole, 3D arm, free body) | match to ~1e-15 |
+| box, sphere, and capsule dropped on a plane (2 s) | match to ~5e-12 |
+| Ant under random control, through ground contact (1 s) | match to ~4e-13 |
 
-The test models cover hinge, slide, ball, and free joints, armature, damping,
-joint `ref`, and all actuator types. Contact models differ from MuJoCo's by
-design, so contact is tested against analytic physics in
-`crates/pippin/tests/contact.rs`:
+Box-box contact uses a different collision algorithm from MuJoCo's, so box
+stacks agree only to about 0.5 mm. `crates/pippin/tests/contact.rs` checks
+contact against analytic physics under both solvers:
 
 - rest heights
-- a 10-box twisted tower that stays stable for 10 s
+- a stable box stack
 - stick below the friction angle
-- sliding acceleration matching `g(sin θ − μ cos θ)` to 13 digits
+- sliding acceleration matching `g(sin θ − μ cos θ)`
 - joint limits
 
-## Performance (CPU reference, M5 Pro, 1024 envs)
+## Performance (CPU reference, M5 Pro, 1024 envs × 200 steps)
 
-| model | MuJoCo (rollout, 18 threads) | Pippin CPU | ratio |
+Open-loop rollouts under random control. Both simulators do the full loop
+natively, using 18 threads.
+
+| model | MuJoCo `rollout` | Pippin `rollout` | ratio |
 |---|---|---|---|
-| Ant | 3.6M steps/s | 2.0M steps/s | 0.55× |
-| 3D arm | 9.8M steps/s | 5.6M steps/s | 0.57× |
-| Cartpole | 15.4M steps/s | 6.7M steps/s | 0.44× |
+| Ant (contacts, joint limits) | 3.3M steps/s | 4.8M steps/s | 1.4× |
+| 3D arm | 9.8M steps/s | 19.2M steps/s | 2.0× |
+| Cartpole | 16.3M steps/s | 43.7M steps/s | 2.7× |
 
-The CPU engine is a readable reference, not the fast path. Its known gaps are
-PGS convergence on heavily coupled systems (fixed by the Newton solver) and
-per-call thread wake-up. The performance target is the Metal backend.
+MuJoCo's rollout also records full state and sensor data, so it does more
+output work. A per-step Python loop (`set` + `step`) is slower (2.4M
+steps/s on Ant) because of per-call thread wake-up. The Metal backend is the
+fast path for RL.
 
 ## Quick start
 
@@ -78,6 +90,9 @@ for _ in range(1000):
     sim.set("ctrl", np.random.uniform(-1, 1, (sim.num_envs, sim.nu)))
     sim.step()
 qpos = sim.get("qpos")  # (4096, nq)
+
+# open-loop: whole control sequence in one call
+traj = sim.rollout(np.zeros((sim.num_envs, 200, sim.nu)))  # (4096, 200, nq)
 ```
 
 Rust tests: `cargo test --release`.
@@ -86,15 +101,14 @@ Benchmark: `python benches/bench_cpu.py`.
 
 ## Roadmap
 
-1. **Newton constraint solver.** A convex, MuJoCo-style solver for fast,
-   accurate convergence on coupled contact-rich systems.
+1. ~~**Newton constraint solver.**~~ Done. It matches MuJoCo through contact.
 2. **Metal backend.** Batched kernels mirroring the CPU layout, zero-copy
    buffers, and a head-to-head benchmark against MJX and Genesis on Apple
    Silicon.
 3. **Meshes.** Convex-hull collision with GJK/EPA, support for URDF and
    MJCF `<asset>`, and YCB-style objects.
-4. **Manipulation essentials.** Torsional friction, equality constraints
-   (welds and mimic grippers), tendons, and sensors.
+4. **Manipulation essentials.** Elliptic cones, torsional friction,
+   equality constraints (welds and mimic grippers), tendons, and sensors.
 5. **Rendering.** A batched Metal rasterizer for RGB, depth, and segmentation
    cameras.
 6. **RL layer.** Gymnasium vector env, ManiSkill-style task suite, and

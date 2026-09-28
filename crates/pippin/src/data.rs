@@ -46,6 +46,13 @@ pub struct Data {
     pub(crate) scratch: Scratch,
 }
 
+impl Data {
+    /// Iterations used by the Newton solver on the last step (diagnostics).
+    pub fn solver_iterations(&self) -> usize {
+        self.scratch.newton_iters
+    }
+}
+
 /// Solver workspace, kept to avoid per-step allocation.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Scratch {
@@ -59,6 +66,11 @@ pub(crate) struct Scratch {
     pub tmp_nv: Vec<Real>,
     pub v: Vec<Real>,
     pub v_pos: Vec<Real>,
+    pub smooth: Vec<Real>,
+    pub nrows: Vec<crate::newton::NRow>,
+    pub damp_h: Vec<Real>,
+    pub newton_buf: Vec<Real>,
+    pub newton_iters: usize,
     pub cacc: Vec<Spatial>,
     pub cfrc: Vec<Spatial>,
 }

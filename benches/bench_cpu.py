@@ -34,14 +34,23 @@ def bench(name):
         mj = NENV * NSTEP / (time.perf_counter() - t)
 
     sim = pippin.Sim(path, NENV)
-    sim.step(10)
+    sim.rollout(np.ascontiguousarray(ctrl[:, :10]))  # warm-up
+    sim.reset()
+    t = time.perf_counter()
+    sim.rollout(ctrl)
+    pp = NENV * NSTEP / (time.perf_counter() - t)
+
+    # per-step Python loop (the typical RL pattern)
     sim.reset()
     t = time.perf_counter()
     for k in range(NSTEP):
         sim.set("ctrl", np.ascontiguousarray(ctrl[:, k]))
         sim.step()
-    pp = NENV * NSTEP / (time.perf_counter() - t)
-    print(f"{name:<14} mujoco {mj/1e3:8.0f}k steps/s   pippin(cpu) {pp/1e3:8.0f}k steps/s   ratio {pp/mj:.2f}x")
+    loop = NENV * NSTEP / (time.perf_counter() - t)
+    print(
+        f"{name:<14} mujoco rollout {mj/1e3:7.0f}k/s   pippin rollout {pp/1e3:7.0f}k/s ({pp/mj:.2f}x)"
+        f"   pippin step loop {loop/1e3:7.0f}k/s"
+    )
 
 
 if __name__ == "__main__":

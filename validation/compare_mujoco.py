@@ -1,4 +1,4 @@
-"""Compare Pippin against MuJoCo on contact-free models.
+"""Compare Pippin against MuJoCo, with and without contact.
 
 Checks, per model:
   1. body masses
@@ -15,7 +15,15 @@ import numpy as np
 import pippin
 
 ASSETS = pathlib.Path(__file__).resolve().parent.parent / "assets"
-MODELS = ["pendulum.xml", "cartpole.xml", "arm3d.xml", "tumble.xml"]
+# (model, trajectory seconds, qpos tolerance). Contact scenes use the Newton solver.
+MODELS = [
+    ("pendulum.xml", 2.0, 1e-8),
+    ("cartpole.xml", 2.0, 1e-8),
+    ("arm3d.xml", 2.0, 1e-8),
+    ("tumble.xml", 2.0, 1e-8),
+    ("box_drop.xml", 2.0, 1e-8),
+    ("ant.xml", 1.0, 1e-8),
+]
 
 
 def random_state(mm: mujoco.MjModel, rng):
@@ -37,7 +45,7 @@ def random_state(mm: mujoco.MjModel, rng):
     return qpos, qvel
 
 
-def check(name: str) -> bool:
+def check(name: str, seconds: float, tol: float) -> bool:
     path = str(ASSETS / name)
     mm = mujoco.MjModel.from_xml_path(path)
     md = mujoco.MjData(mm)
@@ -53,6 +61,9 @@ def check(name: str) -> bool:
 
     assert (sim.nq, sim.nv, sim.nu) == (mm.nq, mm.nv, mm.nu), "dimension mismatch"
     report("body mass", np.max(np.abs(np.array(sim.body_mass()) - mm.body_mass)), 1e-9)
+    rel = lambda a, b: np.max(np.abs(a - b) / np.maximum(1e-12, np.abs(b)))
+    report("body invweight0 (relative)", rel(np.array(sim.body_invweight())[1:], mm.body_invweight0[1:]), 1e-6)
+    report("dof invweight0 (relative)", rel(np.array(sim.dof_invweight()), mm.dof_invweight0), 1e-6)
 
     em = eb = 0.0
     for _ in range(20):
@@ -72,7 +83,7 @@ def check(name: str) -> bool:
     # trajectory
     mujoco.mj_resetData(mm, md)
     sim.reset()
-    steps = int(2.0 / mm.opt.timestep)
+    steps = int(seconds / mm.opt.timestep)
     ctrls = rng.uniform(-1, 1, size=(steps, mm.nu))
     err = 0.0
     for t in range(steps):
@@ -82,15 +93,15 @@ def check(name: str) -> bool:
         mujoco.mj_step(mm, md)
         sim.step()
         err = max(err, np.max(np.abs(sim.get("qpos")[0] - md.qpos)))
-    report(f"qpos trajectory ({steps} steps)", err, 1e-8)
+    report(f"qpos trajectory ({steps} steps)", err, tol)
     return ok
 
 
 def main():
     all_ok = True
-    for name in MODELS:
+    for name, seconds, tol in MODELS:
         print(name)
-        all_ok &= check(name)
+        all_ok &= check(name, seconds, tol)
     print("ALL PASS" if all_ok else "SOME CHECKS FAILED")
     sys.exit(0 if all_ok else 1)
 
