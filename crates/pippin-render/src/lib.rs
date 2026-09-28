@@ -48,7 +48,8 @@ pub struct MetalRenderer {
     config: RenderConfig,
     ngeom: usize,
     ncam: usize,
-    nvert: usize,
+    nindex: usize,
+    indices: Buffer,
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
@@ -62,7 +63,8 @@ pub struct MetalRenderer {
     geom_poses: Option<Buffer>,
     cam_poses: Option<Buffer>,
     targets: Option<(usize, [Texture; 4])>,
-    out: Option<(usize, [Buffer; 3])>,
+    /// Output buffers per slot: (images capacity, [rgba, depth, seg]).
+    out: Vec<Option<(usize, [Buffer; 3])>>,
 }
 
 unsafe impl Send for MetalRenderer {}
@@ -130,7 +132,7 @@ impl MetalRenderer {
         ds.setDepthWriteEnabled(true);
         let depth_state = device.newDepthStencilStateWithDescriptor(&ds).ok_or("depth state")?;
 
-        let verts = mesh::build(scene);
+        let mesh = mesh::build_indexed(scene);
         let colors: Vec<[f32; 4]> = scene.geoms.iter().map(|g| g.rgba).collect();
         let views: Vec<GpuView> = config
             .views
@@ -145,8 +147,9 @@ impl MetalRenderer {
         Ok(MetalRenderer {
             ngeom: scene.geoms.len(),
             ncam: scene.cameras.len(),
-            nvert: verts.len(),
-            verts: buffer_from(&device, &verts)?,
+            nindex: mesh.indices.len(),
+            indices: buffer_from(&device, &mesh.indices)?,
+            verts: buffer_from(&device, &mesh.vertices)?,
             colors: buffer_from(&device, &colors)?,
             views: buffer_from(&device, &views)?,
             cam_fovy: buffer_from(&device, if fovy.is_empty() { &[45.0f32][..] } else { &fovy })?,
@@ -157,13 +160,13 @@ impl MetalRenderer {
             geom_poses: None,
             cam_poses: None,
             targets: None,
-            out: None,
+            out: vec![],
             config,
             device,
         })
     }
 
-    fn ensure_capacity(&mut self, nenv: usize) -> Result<(), String> {
+    fn ensure_capacity(&mut self, slot: usize, nenv: usize) -> Result<(), String> {
         let nimg = nenv * self.config.views.len();
         let pose = std::mem::size_of::<Pose>();
         if self.geom_poses.as_ref().is_none_or(|b| b.length() < nenv * self.ngeom * pose) {
@@ -199,9 +202,13 @@ impl MetalRenderer {
                 ],
             ));
         }
-        if self.out.as_ref().is_none_or(|(n, _)| *n < nimg) {
+        if self.out.len() <= slot {
+            self.out.resize_with(slot + 1, || None);
+        }
+        if self.out[slot].as_ref().is_none_or(|(n, _)| *n < nimg) {
             let px = nimg * self.config.width * self.config.height;
-            self.out = Some((nimg, [new_buffer(&self.device, px * 4)?, new_buffer(&self.device, px * 4)?, new_buffer(&self.device, px * 4)?]));
+            let b = || new_buffer(&self.device, px * 4);
+            self.out[slot] = Some((nimg, [b()?, b()?, b()?]));
         }
         Ok(())
     }
@@ -216,11 +223,11 @@ impl Renderer for MetalRenderer {
         &self.config
     }
 
-    fn render(&mut self, nenv: usize, geoms: &[Pose], cams: &[Pose]) -> Result<Frames<'_>, String> {
+    fn render(&mut self, slot: usize, nenv: usize, geoms: &[Pose], cams: &[Pose]) -> Result<Frames<'_>, String> {
         if geoms.len() != nenv * self.ngeom || cams.len() != nenv * self.ncam {
             return Err(format!("expected {} geom and {} camera poses", nenv * self.ngeom, nenv * self.ncam));
         }
-        self.ensure_capacity(nenv)?;
+        self.ensure_capacity(slot, nenv)?;
         let gp = self.geom_poses.as_ref().unwrap();
         let cp = self.cam_poses.as_ref().unwrap();
         write(gp, geoms);
@@ -230,7 +237,7 @@ impl Renderer for MetalRenderer {
         let nview = self.config.views.len();
         let nimg = nenv * nview;
         let (layers, targets) = self.targets.as_ref().unwrap();
-        let (_, outs) = self.out.as_ref().unwrap();
+        let (_, outs) = self.out[slot].as_ref().unwrap();
         let cb = self.queue.commandBuffer().ok_or("no command buffer")?;
 
         let mut first = 0;
@@ -281,8 +288,15 @@ impl Renderer for MetalRenderer {
                 enc.setVertexBytes_length_atIndex(NonNull::from(&u).cast::<c_void>(), std::mem::size_of::<Uniforms>(), 4);
                 enc.setVertexBuffer_offset_atIndex(Some(&self.colors), 0, 5);
                 enc.setVertexBuffer_offset_atIndex(Some(&self.cam_fovy), 0, 6);
-                if self.nvert > 0 {
-                    enc.drawPrimitives_vertexStart_vertexCount_instanceCount(MTLPrimitiveType::Triangle, 0, self.nvert, count);
+                if self.nindex > 0 {
+                    enc.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount(
+                        MTLPrimitiveType::Triangle,
+                        self.nindex,
+                        MTLIndexType::UInt32,
+                        &self.indices,
+                        0,
+                        count,
+                    );
                 }
             }
             enc.endEncoding();

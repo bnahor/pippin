@@ -103,6 +103,32 @@ fn box_mesh(b: &mut Builder, h: [f32; 3]) {
     }
 }
 
+/// Indexed geometry: unique vertices plus triangle indices. Smooth surfaces
+/// share vertices between triangles, so the GPU's post-transform cache runs
+/// the vertex shader far fewer times than for a raw triangle list.
+pub struct IndexedMesh {
+    pub vertices: Vec<Vtx>,
+    pub indices: Vec<u32>,
+}
+
+pub fn build_indexed(scene: &Scene) -> IndexedMesh {
+    let tris = build(scene);
+    let mut map = std::collections::HashMap::with_capacity(tris.len());
+    let mut vertices = Vec::new();
+    let indices = tris
+        .iter()
+        .map(|v| {
+            let key = (v.pos.map(f32::to_bits), v.normal.map(f32::to_bits), v.geom, v.flags);
+            *map.entry(key).or_insert_with(|| {
+                vertices.push(*v);
+                (vertices.len() - 1) as u32
+            })
+        })
+        .collect();
+    IndexedMesh { vertices, indices }
+}
+
+/// Triangle list (three vertices per triangle).
 pub fn build(scene: &Scene) -> Vec<Vtx> {
     let mut b = Builder { out: vec![], geom: 0, flags: 0 };
     for (g, geom) in scene.geoms.iter().enumerate() {

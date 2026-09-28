@@ -8,8 +8,10 @@
 
 use std::ops::Range;
 
+pub mod pipeline;
 pub mod pippin_cpu;
 
+pub use pipeline::{AsyncEnv, FrameView, Obs};
 pub use pippin_cpu::PippinCpu;
 
 /// State arrays a backend exposes, shaped (envs, width).
@@ -169,12 +171,15 @@ pub struct Frames<'a> {
 }
 
 /// Renders batches of environments from poses alone; independent of physics.
+///
+/// Output lives in numbered `slot`s so several batches can be in flight: a
+/// slot's frames stay valid until that slot is rendered again.
 pub trait Renderer: Send {
     fn name(&self) -> &str;
     fn config(&self) -> &RenderConfig;
-    /// Render `nenv` environments given their geom poses (nenv x ngeom) and
-    /// scene camera poses (nenv x ncam).
-    fn render(&mut self, nenv: usize, geoms: &[Pose], cams: &[Pose]) -> Result<Frames<'_>, String>;
+    /// Render `nenv` environments into `slot`, given their geom poses
+    /// (nenv x ngeom) and scene camera poses (nenv x ncam).
+    fn render(&mut self, slot: usize, nenv: usize, geoms: &[Pose], cams: &[Pose]) -> Result<Frames<'_>, String>;
 }
 
 /// Check buffer sizes shared by all backends.

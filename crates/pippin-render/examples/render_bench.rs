@@ -20,11 +20,11 @@ fn main() {
             far: 20.0,
         };
         let mut r = pippin_render::MetalRenderer::new(&phys.scene(), cfg).unwrap();
-        r.render(n, &g, &c).unwrap();
+        r.render(0, n, &g, &c).unwrap();
         let iters = 20;
         let t = Instant::now();
         for _ in 0..iters {
-            r.render(n, &g, &c).unwrap();
+            r.render(0, n, &g, &c).unwrap();
         }
         let dt = t.elapsed().as_secs_f64() / iters as f64;
         println!("{n:>5} envs {res:>3}x{res:<3} rgb+depth+seg: {:>7.0} frames/s  ({:.2} ms/batch)", n as f64 / dt, dt * 1e3);

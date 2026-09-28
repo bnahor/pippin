@@ -26,7 +26,7 @@ fn render(shape: Shape, size: [f32; 3], pose: Pose, dist: f32) -> (Vec<f32>, Vec
         far: 100.0,
     };
     let mut r = MetalRenderer::new(&scene, cfg).unwrap();
-    let f = r.render(1, &[pose], &[]).unwrap();
+    let f = r.render(0, 1, &[pose], &[]).unwrap();
     (f.depth.to_vec(), f.segmentation.to_vec())
 }
 
