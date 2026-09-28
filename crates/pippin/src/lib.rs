@@ -8,6 +8,7 @@ pub mod collision;
 pub mod data;
 pub mod forward;
 pub mod math;
+pub mod mesh;
 pub mod mjcf;
 pub mod model;
 pub mod newton;

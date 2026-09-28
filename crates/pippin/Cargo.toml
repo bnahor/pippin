@@ -10,6 +10,9 @@ repository.workspace = true
 roxmltree = "0.20"
 rayon = "1.10"
 thiserror = "2"
+parry3d-f64 = "0.31"
+stl_io = "0.11"
+tobj = "4"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"

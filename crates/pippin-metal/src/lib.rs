@@ -86,6 +86,14 @@ impl MetalSim {
         if model.nv == 0 {
             return Err(MetalError::Unsupported("model has no degrees of freedom".into()));
         }
+        if let Some(&(a, b)) =
+            model.collision_pairs.iter().find(|&&(a, b)| pippin::collision::needs_general(model.geom_type[a], model.geom_type[b]))
+        {
+            return Err(MetalError::Unsupported(format!(
+                "geoms '{}' and '{}' need the general convex narrow phase (meshes, cylinders); use a CPU backend",
+                model.geom_names[a], model.geom_names[b]
+            )));
+        }
         let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::NoDevice)?;
         let opts = MTLCompileOptions::new();
         opts.setMathMode(MTLMathMode::Safe);

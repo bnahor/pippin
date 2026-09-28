@@ -35,6 +35,8 @@ pub enum GeomType {
     Capsule,
     Box,
     Cylinder,
+    /// Convex hull of a triangle mesh (index in `geom_dataid`).
+    Mesh,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -159,6 +161,18 @@ pub struct Model {
     pub geom_rgba: Vec<[f32; 4]>,
     /// Bounding sphere radius about the geom center (inf for planes).
     pub geom_rbound: Vec<Real>,
+    /// Mesh index for mesh geoms, usize::MAX otherwise.
+    pub geom_dataid: Vec<usize>,
+    /// Collision shape for the general (parry) narrow phase. Cylinders are
+    /// y-aligned in parry; see `collision::parry_pose`.
+    pub geom_shape: Vec<parry3d_f64::shape::SharedShape>,
+
+    // ---- meshes ----
+    pub mesh_names: Vec<String>,
+    /// Visual mesh as loaded (file coordinates, scaled).
+    pub mesh: Vec<crate::mesh::TriMesh>,
+    /// Convex hull used for collision and mass.
+    pub mesh_hull: Vec<crate::mesh::TriMesh>,
 
     // ---- cameras (look along -z, y up, as in MuJoCo) ----
     pub cam_names: Vec<String>,
@@ -250,9 +264,11 @@ impl Model {
                     GeomType::Capsule => s[0] + s[1],
                     GeomType::Box => s.norm(),
                     GeomType::Cylinder => (s[0] * s[0] + s[1] * s[1]).sqrt(),
+                    GeomType::Mesh => self.mesh_hull[self.geom_dataid[g]].vertices.iter().map(|v| v.norm()).fold(0.0, Real::max),
                 }
             })
             .collect();
+        self.geom_shape = (0..self.ngeom()).map(|g| self.build_shape(g)).collect();
 
         // static collision filtering
         self.collision_pairs.clear();
@@ -267,6 +283,24 @@ impl Model {
         if self.solver.contact_hertz <= 0.0 {
             // Stiffest spring the integrator can resolve stably, with margin.
             self.solver.contact_hertz = 0.25 / self.timestep;
+        }
+    }
+
+    fn build_shape(&self, g: usize) -> parry3d_f64::shape::SharedShape {
+        use parry3d_f64::math::Vector;
+        use parry3d_f64::shape::SharedShape;
+        let s = self.geom_size[g];
+        match self.geom_type[g] {
+            GeomType::Plane => SharedShape::halfspace(Vector::new(0.0, 0.0, 1.0)),
+            GeomType::Sphere => SharedShape::ball(s[0]),
+            GeomType::Capsule => SharedShape::capsule_z(s[1], s[0]),
+            GeomType::Box => SharedShape::cuboid(s[0], s[1], s[2]),
+            GeomType::Cylinder => SharedShape::cylinder(s[1], s[0]),
+            GeomType::Mesh => {
+                let hull = &self.mesh_hull[self.geom_dataid[g]];
+                let pts: Vec<Vector> = hull.vertices.iter().map(|v| Vector::new(v[0], v[1], v[2])).collect();
+                SharedShape::convex_hull(&pts).unwrap_or_else(|| SharedShape::ball(1e-6))
+            }
         }
     }
 

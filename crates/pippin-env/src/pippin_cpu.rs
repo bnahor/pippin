@@ -7,7 +7,7 @@ use pippin::model::GeomType;
 use pippin::{forward, Data, Model};
 use rayon::prelude::*;
 
-use crate::{check_len, CameraDesc, Dims, Field, GeomVisual, Physics, Pose, Scene, Shape};
+use crate::{check_len, CameraDesc, Dims, Field, GeomVisual, Mesh, Physics, Pose, Scene, Shape};
 
 pub struct PippinCpu {
     pub model: Model,
@@ -64,6 +64,7 @@ impl Physics for PippinCpu {
                     GeomType::Capsule => Shape::Capsule,
                     GeomType::Box => Shape::Box,
                     GeomType::Cylinder => Shape::Cylinder,
+                    GeomType::Mesh => Shape::Mesh(m.geom_dataid[g]),
                 },
                 size: m.geom_size[g].0.map(|x| x as f32),
                 rgba: m.geom_rgba[g],
@@ -74,7 +75,17 @@ impl Physics for PippinCpu {
         let cameras = (0..m.cam_body.len())
             .map(|c| CameraDesc { name: m.cam_names[c].clone(), fovy: m.cam_fovy[c] as f32 })
             .collect();
-        Scene { geoms, meshes: vec![], cameras }
+        let meshes = m
+            .mesh
+            .iter()
+            .zip(&m.mesh_names)
+            .map(|(t, name)| Mesh {
+                name: name.clone(),
+                vertices: t.vertices.iter().map(|v| v.0.map(|x| x as f32)).collect(),
+                triangles: t.triangles.clone(),
+            })
+            .collect();
+        Scene { geoms, meshes, cameras }
     }
 
     fn step(&mut self, envs: Range<usize>, nstep: usize) {

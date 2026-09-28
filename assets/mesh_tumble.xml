@@ -1,0 +1,18 @@
+<mujoco model="mesh_tumble">
+  <option timestep="0.002" gravity="0 0 -9.81"/>
+  <asset>
+    <!-- asymmetric convex point cloud, center of mass off the origin. Coordinates
+         are exact in f32 because MuJoCo stores mesh vertices as float. -->
+    <mesh name="rock" vertex="0 0 0  0.1875 0 0  0 0.125 0  0 0 0.078125  0.15625 0.09375 0.046875  0.046875 0.015625 0.125  0.171875 -0.03125 0.015625"/>
+  </asset>
+  <worldbody>
+    <body name="rock" pos="0 0 1" euler="10 25 40">
+      <freejoint/>
+      <geom type="mesh" mesh="rock" pos="0.02 -0.01 0.03" euler="5 0 15" contype="0" conaffinity="0"/>
+      <body name="arm" pos="0.1 0 0">
+        <joint type="hinge" axis="0 1 0" damping="0.01"/>
+        <geom type="mesh" mesh="rock" density="300" contype="0" conaffinity="0"/>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>

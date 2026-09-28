@@ -218,7 +218,11 @@ pub fn collide(m: &Model, d: &mut Data) {
         }
         let pose = |g: usize| GeomPose { typ: m.geom_type[g], pos: d.geom_xpos[g], mat: d.geom_xmat[g], size: m.geom_size[g] };
         hits.clear();
-        collision::collide(&pose(g1), &pose(g2), margin, &mut hits);
+        if collision::needs_general(m.geom_type[g1], m.geom_type[g2]) {
+            collision::collide_general(&pose(g1), &m.geom_shape[g1], &pose(g2), &m.geom_shape[g2], margin, &mut hits);
+        } else {
+            collision::collide(&pose(g1), &pose(g2), margin, &mut hits);
+        }
         for (i, h) in hits.iter().enumerate() {
             d.contacts.push(Contact {
                 pos: h.pos,

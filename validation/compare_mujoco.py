@@ -21,6 +21,7 @@ MODELS = [
     ("cartpole.xml", 2.0, 1e-8),
     ("arm3d.xml", 2.0, 1e-8),
     ("tumble.xml", 2.0, 1e-8),
+    ("mesh_tumble.xml", 2.0, 1e-8),
     ("box_drop.xml", 2.0, 1e-8),
     ("ant.xml", 1.0, 1e-8),
 ]
@@ -83,6 +84,10 @@ def check(name: str, seconds: float, tol: float) -> bool:
     # trajectory
     mujoco.mj_resetData(mm, md)
     sim.reset()
+    # start moving so every inertia term matters (free fall alone does not)
+    qvel0 = rng.normal(size=mm.nv) * 0.5
+    md.qvel[:] = qvel0
+    sim.set("qvel", qvel0[None])
     steps = int(seconds / mm.opt.timestep)
     ctrls = rng.uniform(-1, 1, size=(steps, mm.nu))
     err = 0.0

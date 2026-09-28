@@ -158,17 +158,26 @@ struct Builder {
 }
 
 pub fn load_file(path: impl AsRef<Path>) -> Result<Model, MjcfError> {
+    let path = path.as_ref();
     let text = std::fs::read_to_string(path)?;
-    load_str(&text)
+    let dir = path.parent().unwrap_or(Path::new("."));
+    load_str_in(&text, dir)
 }
 
+/// Load from a string; relative asset paths resolve against the working directory.
 pub fn load_str(xml: &str) -> Result<Model, MjcfError> {
+    load_str_in(xml, Path::new("."))
+}
+
+/// Load from a string, resolving relative asset paths against `dir`.
+pub fn load_str_in(xml: &str, dir: &Path) -> Result<Model, MjcfError> {
     let doc = Document::parse(xml)?;
     let root = doc.root_element();
     if root.tag_name().name() != "mujoco" {
         return invalid("root element must be <mujoco>");
     }
 
+    let mut meshdir = dir.to_path_buf();
     let mut ctx = Ctx {
         degrees: true,
         eulerseq: *b"xyz",
@@ -190,6 +199,9 @@ pub fn load_str(xml: &str) -> Result<Model, MjcfError> {
         }
         if let Some(a) = c.attribute("autolimits") {
             ctx.autolimits = a == "true";
+        }
+        if let Some(d) = c.attribute("meshdir").or(c.attribute("assetdir")) {
+            meshdir = dir.join(d);
         }
     }
 
@@ -243,6 +255,11 @@ pub fn load_str(xml: &str) -> Result<Model, MjcfError> {
     }
 
     let mut b = Builder { m, geom_mass: vec![], explicit_inertial: vec![] };
+    for a in children(root, "asset") {
+        for mesh in children(a, "mesh") {
+            parse_mesh(&ctx, &mut b.m, mesh, &meshdir)?;
+        }
+    }
 
     // world body
     add_body(&mut b, "world".into(), 0, Vec3::ZERO, Quat::IDENTITY);
@@ -261,7 +278,7 @@ pub fn load_str(xml: &str) -> Result<Model, MjcfError> {
     }
     b.m.nu = b.m.actuator_joint.len();
 
-    for tag in ["contact", "equality", "tendon", "sensor", "asset", "keyframe", "visual", "statistic"] {
+    for tag in ["contact", "equality", "tendon", "sensor", "keyframe", "visual", "statistic"] {
         if children(root, tag).next().is_some() {
             ctx.warnings.push(format!("<{tag}> is not supported yet and was ignored"));
         }
@@ -341,6 +358,11 @@ fn empty_model() -> Model {
         geom_conaffinity: vec![],
         geom_rgba: vec![],
         geom_rbound: vec![],
+        geom_dataid: vec![],
+        geom_shape: vec![],
+        mesh_names: vec![],
+        mesh: vec![],
+        mesh_hull: vec![],
         cam_names: vec![],
         cam_body: vec![],
         cam_pos: vec![],
@@ -499,6 +521,7 @@ fn parse_geom(ctx: &mut Ctx, b: &mut Builder, node: Node, body: usize, class: &s
         "capsule" => GeomType::Capsule,
         "box" => GeomType::Box,
         "cylinder" => GeomType::Cylinder,
+        "mesh" => GeomType::Mesh,
         t => {
             ctx.warnings.push(format!("geom type '{t}' not supported yet; geom skipped"));
             return Ok(());
@@ -531,8 +554,32 @@ fn parse_geom(ctx: &mut Ctx, b: &mut Builder, node: Node, body: usize, class: &s
     let conaffinity = ctx.float(&node, class, "conaffinity", 1.0)? as u32;
     let rgba = ctx.floats(&node, class, "rgba")?.map(|v| [v[0] as f32, v[1] as f32, v[2] as f32, v[3] as f32]);
 
+    let dataid = if gt == GeomType::Mesh {
+        let name = ctx.get(&node, class, "mesh").ok_or_else(|| MjcfError::Invalid("mesh geom needs a 'mesh' attribute".into()))?;
+        b.m.mesh_names.iter().position(|n| n == name).ok_or_else(|| MjcfError::Invalid(format!("unknown mesh '{name}'")))?
+    } else {
+        usize::MAX
+    };
+
     // mass properties
-    if gt != GeomType::Plane {
+    if gt == GeomType::Mesh {
+        let (vol, com, icom) = crate::mesh::mass_properties(&b.m.mesh_hull[dataid]);
+        let mass = match ctx.floats(&node, class, "mass")? {
+            Some(v) => v[0],
+            None => ctx.float(&node, class, "density", 1000.0)? * vol,
+        };
+        if mass > 0.0 && vol > 0.0 {
+            let r = quat.to_mat();
+            let c = pos + r.mul_vec(com);
+            let ig = icom.scale(mass / vol).rotate(&r);
+            let cc = Mat3::skew(c);
+            let shifted = ig.add(&cc.mul_mat(&cc.transpose()).scale(mass));
+            let e = &mut b.geom_mass[body];
+            e.0 += mass;
+            e.1 += c * mass;
+            e.2 = e.2.add(&shifted);
+        }
+    } else if gt != GeomType::Plane {
         let (vol, inertia_unit) = geom_volume_inertia(gt, size);
         let mass = match ctx.floats(&node, class, "mass")? {
             Some(v) => v[0],
@@ -563,13 +610,47 @@ fn parse_geom(ctx: &mut Ctx, b: &mut Builder, node: Node, body: usize, class: &s
     m.geom_contype.push(contype);
     m.geom_conaffinity.push(conaffinity);
     m.geom_rgba.push(rgba.unwrap_or([0.5, 0.5, 0.5, 1.0]));
+    m.geom_dataid.push(dataid);
+    Ok(())
+}
+
+fn parse_mesh(ctx: &Ctx, m: &mut Model, node: Node, meshdir: &Path) -> Result<(), MjcfError> {
+    let class = "main";
+    let file = node.attribute("file");
+    let name = node
+        .attribute("name")
+        .map(String::from)
+        .or_else(|| file.and_then(|f| Path::new(f).file_stem()).map(|s| s.to_string_lossy().into_owned()))
+        .ok_or_else(|| MjcfError::Invalid("mesh needs a name or file".into()))?;
+    let mut mesh = if let Some(f) = file {
+        crate::mesh::load(&meshdir.join(f)).map_err(|e| MjcfError::Invalid(e.to_string()))?
+    } else if let Some(v) = ctx.floats(&node, class, "vertex")? {
+        let vertices: Vec<Vec3> = v.chunks(3).filter(|c| c.len() == 3).map(|c| Vec3::new(c[0], c[1], c[2])).collect();
+        crate::mesh::TriMesh { vertices, triangles: vec![] }
+    } else {
+        return invalid(format!("mesh '{name}' needs 'file' or 'vertex'"));
+    };
+    let scale = ctx.vec3(&node, class, "scale", Vec3::new(1.0, 1.0, 1.0))?;
+    for v in &mut mesh.vertices {
+        *v = v.mul_elem(scale);
+    }
+    let hull = crate::mesh::convex_hull(&mesh.vertices);
+    if hull.triangles.is_empty() {
+        return invalid(crate::mesh::MeshError::Degenerate(name).to_string());
+    }
+    if mesh.triangles.is_empty() {
+        mesh = hull.clone(); // point cloud: render the hull
+    }
+    m.mesh_names.push(name);
+    m.mesh.push(mesh);
+    m.mesh_hull.push(hull);
     Ok(())
 }
 
 /// Volume and principal inertia per unit density (i.e. inertia / density).
 fn geom_volume_inertia(gt: GeomType, s: Vec3) -> (Real, Vec3) {
     match gt {
-        GeomType::Plane => (0.0, Vec3::ZERO),
+        GeomType::Plane | GeomType::Mesh => (0.0, Vec3::ZERO),
         GeomType::Sphere => {
             let r = s[0];
             let v = 4.0 / 3.0 * PI * r * r * r;

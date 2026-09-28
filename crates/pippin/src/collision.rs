@@ -96,13 +96,53 @@ pub fn collide(a: &GeomPose, b: &GeomPose, margin: Real, out: &mut Vec<Hit>) {
 }
 
 pub fn pair_supported(a: GeomType, b: GeomType) -> bool {
+    !(a == GeomType::Plane && b == GeomType::Plane)
+}
+
+/// Pairs handled by the general convex narrow phase (parry: GJK/EPA with
+/// polygonal feature clipping) rather than the specialized routines above.
+pub fn needs_general(a: GeomType, b: GeomType) -> bool {
     use GeomType::*;
-    let (a, b) = if (a as u8) <= (b as u8) { (a, b) } else { (b, a) };
-    match (a, b) {
-        (Plane, Plane) => false,
-        (Plane, _) => true,
-        (_, Cylinder) => false,
-        _ => true,
+    a == Mesh || b == Mesh || (a == Cylinder && b != Plane) || (b == Cylinder && a != Plane)
+}
+
+/// World pose of a geom as a parry pose. Parry cylinders are y-aligned; ours
+/// are z-aligned, so cylinders get an extra rotation.
+fn parry_pose(g: &GeomPose) -> parry3d_f64::math::Pose {
+    use parry3d_f64::math::{Pose, Rotation, Vector};
+    let q = crate::math::Quat::from_mat(&g.mat);
+    let mut rot = Rotation::from_xyzw(q.0[1], q.0[2], q.0[3], q.0[0]);
+    if g.typ == GeomType::Cylinder {
+        rot = rot * Rotation::from_rotation_x(std::f64::consts::FRAC_PI_2);
+    }
+    Pose::from_parts(Vector::new(g.pos[0], g.pos[1], g.pos[2]), rot)
+}
+
+/// General convex-convex contact manifold between two geoms.
+pub fn collide_general(
+    a: &GeomPose,
+    sa: &parry3d_f64::shape::SharedShape,
+    b: &GeomPose,
+    sb: &parry3d_f64::shape::SharedShape,
+    margin: Real,
+    out: &mut Vec<Hit>,
+) {
+    use parry3d_f64::query::{ContactManifold, DefaultQueryDispatcher, PersistentQueryDispatcher};
+    let (pa, pb) = (parry_pose(a), parry_pose(b));
+    let pos12 = pa.inverse() * pb;
+    let mut manifolds: Vec<ContactManifold<(), ()>> = Vec::new();
+    let mut workspace = None;
+    if DefaultQueryDispatcher.contact_manifolds(&pos12, &*sa.0, &*sb.0, margin, &mut manifolds, &mut workspace).is_err() {
+        return;
+    }
+    let v = |p: parry3d_f64::math::Vector| Vec3::new(p.x, p.y, p.z);
+    for m in &manifolds {
+        let n = v(pa.rotation * m.local_n1);
+        for c in &m.points {
+            let p1 = v(pa * c.local_p1);
+            let p2 = v(pb * c.local_p2);
+            out.push(Hit::new((p1 + p2) * 0.5, n, -c.dist));
+        }
     }
 }
 
