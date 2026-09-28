@@ -345,6 +345,9 @@ version = "0.1.0"
 dependencies = [
  "numpy",
  "pippin",
+ "pippin-env",
+ "pippin-mujoco",
+ "pippin-render",
  "pyo3",
 ]
 

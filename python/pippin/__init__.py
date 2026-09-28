@@ -1,5 +1,5 @@
 """Pippin: robot simulation for Apple Silicon."""
 
-from pippin._pippin import Sim
+from pippin._pippin import AsyncEnv, Sim
 
-__all__ = ["Sim"]
+__all__ = ["AsyncEnv", "Sim"]

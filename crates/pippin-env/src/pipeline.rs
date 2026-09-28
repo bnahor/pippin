@@ -18,6 +18,7 @@
 
 use std::ops::Range;
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Mutex;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -87,7 +88,7 @@ pub struct AsyncEnv {
     scene: Scene,
     groups: Vec<Range<usize>>,
     phys_tx: Sender<PhysJob>,
-    out_rx: Receiver<Result<Obs, String>>,
+    out_rx: Mutex<Receiver<Result<Obs, String>>>,
     threads: Vec<JoinHandle<()>>,
 }
 
@@ -189,7 +190,7 @@ impl AsyncEnv {
                 .expect("spawn physics thread"),
         );
 
-        AsyncEnv { dims, scene, groups: ranges, phys_tx, out_rx, threads }
+        AsyncEnv { dims, scene, groups: ranges, phys_tx, out_rx: Mutex::new(out_rx), threads }
     }
 
     pub fn dims(&self) -> Dims {
@@ -218,7 +219,8 @@ impl AsyncEnv {
 
     /// Block until the next group finishes.
     pub fn recv(&self) -> Result<Obs, String> {
-        self.out_rx.recv().map_err(|_| "pipeline stopped".to_string())?
+        let rx = self.out_rx.lock().map_err(|_| "pipeline receiver poisoned".to_string())?;
+        rx.recv().map_err(|_| "pipeline stopped".to_string())?
     }
 }
 

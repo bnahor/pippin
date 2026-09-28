@@ -1,5 +1,7 @@
 //! Python bindings: a vectorized simulator handle with numpy state access.
 
+mod async_env;
+
 use numpy::prelude::*;
 use numpy::{PyArray1, PyArray2, PyReadonlyArray2};
 use pippin::batch::Field;
@@ -162,5 +164,6 @@ impl PySim {
 #[pymodule]
 fn _pippin(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySim>()?;
+    m.add_class::<async_env::PyAsyncEnv>()?;
     Ok(())
 }
