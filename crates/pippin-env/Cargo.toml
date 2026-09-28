@@ -1,0 +1,11 @@
+[package]
+name = "pippin-env"
+description = "Engine-agnostic physics and rendering interfaces for batched robot simulation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+pippin = { path = "../pippin" }
+rayon = "1.10"

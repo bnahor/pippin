@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/pippin", "crates/pippin-metal", "crates/pippin-py"]
+members = ["crates/pippin", "crates/pippin-env", "crates/pippin-metal", "crates/pippin-mujoco", "crates/pippin-py"]
 
 [workspace.package]
 version = "0.1.0"

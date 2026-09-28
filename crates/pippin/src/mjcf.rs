@@ -341,6 +341,11 @@ fn empty_model() -> Model {
         geom_conaffinity: vec![],
         geom_rgba: vec![],
         geom_rbound: vec![],
+        cam_names: vec![],
+        cam_body: vec![],
+        cam_pos: vec![],
+        cam_quat: vec![],
+        cam_fovy: vec![],
         actuator_names: vec![],
         actuator_joint: vec![],
         actuator_gear: vec![],
@@ -394,7 +399,17 @@ fn parse_body_contents(ctx: &mut Ctx, b: &mut Builder, node: Node, body: usize, 
                 let id = add_body(b, name, body, pos, quat);
                 parse_body_contents(ctx, b, c, id, &child_class)?;
             }
-            "site" | "camera" | "light" | "include" => {}
+            "camera" => {
+                let m = &mut b.m;
+                let id = m.cam_body.len();
+                m.cam_names.push(c.attribute("name").map(String::from).unwrap_or_else(|| format!("camera{id}")));
+                m.cam_body.push(body);
+                m.cam_pos.push(ctx.vec3(&c, class, "pos", Vec3::ZERO)?);
+                m.cam_quat.push(ctx.orientation(&c, class)?);
+                // fovy is always in degrees in MJCF
+                m.cam_fovy.push(ctx.float(&c, class, "fovy", 45.0)?);
+            }
+            "site" | "light" | "include" => {}
             other => ctx.warnings.push(format!("<{other}> inside body is not supported")),
         }
     }

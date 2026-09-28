@@ -160,6 +160,14 @@ pub struct Model {
     /// Bounding sphere radius about the geom center (inf for planes).
     pub geom_rbound: Vec<Real>,
 
+    // ---- cameras (look along -z, y up, as in MuJoCo) ----
+    pub cam_names: Vec<String>,
+    pub cam_body: Vec<usize>,
+    pub cam_pos: Vec<Vec3>,
+    pub cam_quat: Vec<Quat>,
+    /// Vertical field of view in degrees.
+    pub cam_fovy: Vec<Real>,
+
     // ---- actuators (joint transmission only for now) ----
     pub actuator_names: Vec<String>,
     pub actuator_joint: Vec<usize>,

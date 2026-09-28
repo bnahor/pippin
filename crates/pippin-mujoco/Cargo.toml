@@ -1,0 +1,18 @@
+[package]
+name = "pippin-mujoco"
+description = "MuJoCo physics backend for pippin-env"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+links = "mujoco"
+
+[dependencies]
+pippin-env = { path = "../pippin-env" }
+rayon = "1.10"
+
+[build-dependencies]
+bindgen = "0.73"
+
+[dev-dependencies]
+pippin = { path = "../pippin" }
