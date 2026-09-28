@@ -1,0 +1,25 @@
+<mujoco model="cartpole">
+  <option timestep="0.005"/>
+  <default>
+    <geom contype="0" conaffinity="0"/>
+    <joint damping="0.02"/>
+  </default>
+  <worldbody>
+    <body name="cart" pos="0 0 0.5">
+      <joint name="slider" type="slide" axis="1 0 0"/>
+      <geom type="box" size="0.2 0.1 0.05" density="500"/>
+      <body name="pole" pos="0 0 0">
+        <joint name="hinge" type="hinge" axis="0 1 0" armature="0.01"/>
+        <geom type="capsule" fromto="0 0 0 0.02 0 0.6" size="0.03"/>
+        <body name="pole2" pos="0.02 0 0.6">
+          <joint name="hinge2" type="hinge" axis="0 1 0" ref="10"/>
+          <geom type="capsule" fromto="0 0 0 0 0 0.5" size="0.025"/>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+  <actuator>
+    <motor joint="slider" gear="10" ctrlrange="-1 1"/>
+    <position joint="hinge2" kp="5" kv="0.2"/>
+  </actuator>
+</mujoco>

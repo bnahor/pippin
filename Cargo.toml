@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/pippin", "crates/pippin-py"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/bnahor/pippin"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 1

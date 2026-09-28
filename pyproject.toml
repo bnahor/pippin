@@ -1,0 +1,20 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "pippin"
+description = "GPU-batched robot simulation for Apple Silicon"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+dependencies = ["numpy>=1.24"]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+validate = ["mujoco>=3.2"]
+
+[tool.maturin]
+manifest-path = "crates/pippin-py/Cargo.toml"
+python-source = "python"
+module-name = "pippin._pippin"
+features = ["pyo3/extension-module"]

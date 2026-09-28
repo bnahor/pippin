@@ -1,0 +1,16 @@
+[package]
+name = "pippin"
+description = "GPU-batched robot simulation for Apple Silicon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+roxmltree = "0.20"
+rayon = "1.10"
+thiserror = "2"
+
+[[example]]
+name = "bench"
+path = "../../benches/bench.rs"

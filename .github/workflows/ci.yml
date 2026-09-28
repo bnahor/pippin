@@ -1,0 +1,13 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --release --workspace --exclude pippin-py
+      - uses: astral-sh/setup-uv@v6
+      - run: uv venv && uv pip install maturin mujoco numpy
+      - run: uv run maturin develop --release
+      - run: uv run python validation/compare_mujoco.py

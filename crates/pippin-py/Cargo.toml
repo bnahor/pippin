@@ -1,0 +1,15 @@
+[package]
+name = "pippin-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "_pippin"
+crate-type = ["cdylib"]
+
+[dependencies]
+pippin = { path = "../pippin" }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
+numpy = "0.29"

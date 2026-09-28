@@ -1,0 +1,13 @@
+<mujoco model="tumble">
+  <option timestep="0.001" gravity="0 0 -9.81"/>
+  <worldbody>
+    <body name="brick" pos="0.1 -0.2 1" euler="20 30 40">
+      <freejoint/>
+      <geom type="box" size="0.3 0.1 0.05" contype="0" conaffinity="0"/>
+      <body name="appendage" pos="0.3 0 0">
+        <joint type="hinge" axis="0 0 1" damping="0.01"/>
+        <geom type="capsule" fromto="0 0 0 0.2 0.1 0" size="0.02" contype="0" conaffinity="0"/>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>
