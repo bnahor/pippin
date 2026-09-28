@@ -1,0 +1,61 @@
+<?xml version="1.0"?>
+<!-- Test arm covering URDF features: every joint type, rotated inertial
+     frames with off-diagonal inertia, a link without <inertial>, primitive
+     and mesh collision, materials, and non-trivial rpy origins. -->
+<robot name="test_arm">
+  <material name="blue"><color rgba="0.2 0.3 0.8 1"/></material>
+
+  <link name="base">
+    <inertial><mass value="2.0"/><inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/></inertial>
+    <collision><geometry><box size="0.2 0.2 0.1"/></geometry></collision>
+    <visual><geometry><box size="0.2 0.2 0.1"/></geometry><material name="blue"/></visual>
+  </link>
+
+  <joint name="shoulder_yaw" type="revolute">
+    <parent link="base"/><child link="upper"/>
+    <origin xyz="0 0 0.1" rpy="0 0 0.3"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.5" upper="2.5" effort="10" velocity="3"/>
+    <dynamics damping="0.05"/>
+  </joint>
+  <link name="upper">
+    <inertial>
+      <origin xyz="0.12 0.01 0.02" rpy="0.1 0.2 0.3"/>
+      <mass value="0.8"/>
+      <inertia ixx="0.004" ixy="0.0003" ixz="-0.0002" iyy="0.006" iyz="0.0001" izz="0.005"/>
+    </inertial>
+    <collision><origin xyz="0.12 0 0" rpy="0 1.5708 0"/><geometry><cylinder radius="0.03" length="0.24"/></geometry></collision>
+  </link>
+
+  <joint name="elbow" type="continuous">
+    <parent link="upper"/><child link="fore"/>
+    <origin xyz="0.24 0 0" rpy="0.4 0 -0.2"/>
+    <axis xyz="0 1 0"/>
+    <dynamics damping="0.02"/>
+  </joint>
+  <link name="fore">
+    <!-- no inertial: mass comes from collision geometry (density 1000) -->
+    <collision><origin xyz="0.08 0 0"/><geometry><box size="0.16 0.04 0.04"/></geometry></collision>
+    <collision><origin xyz="0.16 0 0"/><geometry><sphere radius="0.03"/></geometry></collision>
+    <visual><origin xyz="0.08 0 0"/><geometry><box size="0.16 0.04 0.04"/></geometry></visual>
+  </link>
+
+  <joint name="slider" type="prismatic">
+    <parent link="fore"/><child link="tip"/>
+    <origin xyz="0.18 0 0" rpy="0 0 0"/>
+    <axis xyz="1 0.5 0"/>
+    <limit lower="-0.05" upper="0.05" effort="5" velocity="1"/>
+  </joint>
+  <link name="tip">
+    <inertial><origin xyz="0.01 0 0"/><mass value="0.1"/><inertia ixx="1e-4" ixy="0" ixz="0" iyy="2e-4" iyz="0" izz="1.5e-4"/></inertial>
+    <collision><geometry><mesh filename="meshes/wedge.obj"/></geometry></collision>
+  </link>
+
+  <joint name="tool_mount" type="fixed">
+    <parent link="tip"/><child link="tool"/>
+    <origin xyz="0.05 0 0" rpy="0 0.5 0"/>
+  </joint>
+  <link name="tool">
+    <inertial><origin xyz="0.02 0 0"/><mass value="0.05"/><inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/></inertial>
+  </link>
+</robot>

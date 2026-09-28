@@ -14,6 +14,7 @@ pub mod model;
 pub mod newton;
 pub mod simd;
 pub mod solver;
+pub mod urdf;
 pub mod threads;
 
 pub use batch::Batch;

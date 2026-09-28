@@ -56,6 +56,18 @@ impl PySim {
         self.batch.model.timestep
     }
     #[getter]
+    fn joint_names(&self) -> Vec<String> {
+        self.batch.model.jnt_names.clone()
+    }
+    #[getter]
+    fn joint_qposadr(&self) -> Vec<usize> {
+        self.batch.model.jnt_qposadr.clone()
+    }
+    #[getter]
+    fn joint_dofadr(&self) -> Vec<usize> {
+        self.batch.model.jnt_dofadr.clone()
+    }
+    #[getter]
     fn body_names(&self) -> Vec<String> {
         self.batch.model.body_names.clone()
     }

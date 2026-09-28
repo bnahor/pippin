@@ -161,6 +161,10 @@ pub fn load_file(path: impl AsRef<Path>) -> Result<Model, MjcfError> {
     let path = path.as_ref();
     let text = std::fs::read_to_string(path)?;
     let dir = path.parent().unwrap_or(Path::new("."));
+    // URDF is detected by its root element
+    if Document::parse(&text)?.root_element().tag_name().name() == "robot" {
+        return crate::urdf::load_file(path, &crate::urdf::UrdfOptions::default());
+    }
     load_str_in(&text, dir)
 }
 
