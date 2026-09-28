@@ -646,8 +646,8 @@ fn parse_mesh(ctx: &Ctx, m: &mut Model, node: Node, meshdir: &Path) -> Result<()
         mesh = hull.clone(); // point cloud: render the hull
     }
     m.mesh_names.push(name);
-    m.mesh.push(mesh);
-    m.mesh_hull.push(hull);
+    m.mesh.push(std::sync::Arc::new(mesh));
+    m.mesh_hull.push(std::sync::Arc::new(hull));
     Ok(())
 }
 

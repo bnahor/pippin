@@ -8,6 +8,8 @@
 
 use std::ops::Range;
 
+pub use pippin::params::Param;
+
 pub mod pipeline;
 pub mod pippin_cpu;
 
@@ -89,6 +91,7 @@ pub struct CameraDesc {
 /// Everything static a renderer needs. Exported once per model.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Scene {
+    pub bodies: Vec<String>,
     pub geoms: Vec<GeomVisual>,
     pub meshes: Vec<Mesh>,
     pub cameras: Vec<CameraDesc>,
@@ -123,6 +126,48 @@ pub trait Physics: Send {
     /// World poses for `envs`: geoms into `geoms` (envs x ngeom) and cameras
     /// into `cams` (envs x ncam). Poses reflect the most recent step.
     fn poses(&self, envs: Range<usize>, geoms: &mut [Pose], cams: &mut [Pose]);
+
+    /// Set a model parameter of element `id` for `envs`; `values` is shaped
+    /// (envs.len(), param width). Backends without per-env models refuse.
+    fn set_param(&mut self, p: Param, id: usize, envs: Range<usize>, values: &[f64]) -> Result<(), String> {
+        let _ = (p, id, envs, values);
+        Err(format!("backend '{}' does not support per-environment parameters", self.name()))
+    }
+
+    /// Read a model parameter of element `id` for `envs` into `out`.
+    fn get_param(&self, p: Param, id: usize, envs: Range<usize>, out: &mut [f64]) -> Result<(), String> {
+        let _ = (p, id, envs, out);
+        Err(format!("backend '{}' does not support per-environment parameters", self.name()))
+    }
+
+    /// Per-environment geom appearance (envs x ngeom). The default is the
+    /// scene's colors at unit scale.
+    fn appearance(&self, envs: Range<usize>, out: &mut [Appearance]) {
+        let scene = self.scene();
+        let ng = scene.geoms.len();
+        check_len("appearance", out.len(), &envs, ng);
+        for k in 0..envs.len() {
+            for (g, geom) in scene.geoms.iter().enumerate() {
+                out[k * ng + g] = Appearance { rgba: geom.rgba, scale: [1.0; 3], pad: 0.0 };
+            }
+        }
+    }
+}
+
+/// Per-environment geom appearance: color and scale relative to the scene's
+/// geom size (sizes can be randomized per environment).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Appearance {
+    pub rgba: [f32; 4],
+    pub scale: [f32; 3],
+    pub pad: f32,
+}
+
+impl Default for Appearance {
+    fn default() -> Self {
+        Appearance { rgba: [0.5, 0.5, 0.5, 1.0], scale: [1.0; 3], pad: 0.0 }
+    }
 }
 
 /// Where a rendered view comes from.
@@ -180,8 +225,16 @@ pub trait Renderer: Send {
     fn name(&self) -> &str;
     fn config(&self) -> &RenderConfig;
     /// Render `nenv` environments into `slot`, given their geom poses
-    /// (nenv x ngeom) and scene camera poses (nenv x ncam).
-    fn render(&mut self, slot: usize, nenv: usize, geoms: &[Pose], cams: &[Pose]) -> Result<Frames<'_>, String>;
+    /// (nenv x ngeom), scene camera poses (nenv x ncam), and optionally
+    /// per-environment appearance (nenv x ngeom; None = scene defaults).
+    fn render(
+        &mut self,
+        slot: usize,
+        nenv: usize,
+        geoms: &[Pose],
+        cams: &[Pose],
+        appearance: Option<&[Appearance]>,
+    ) -> Result<Frames<'_>, String>;
 }
 
 /// Check buffer sizes shared by all backends.

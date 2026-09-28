@@ -23,6 +23,12 @@ struct View {
     Pose fixed;
 };
 
+struct Appearance {
+    float4 rgba;
+    float scale[3];
+    float pad;
+};
+
 struct Uniforms {
     uint ngeom;
     uint ncam;
@@ -65,16 +71,19 @@ vertex VOut vs(uint vid [[vertex_id]],
                device const Pose* cams [[buffer(2)]],
                constant View* views [[buffer(3)]],
                constant Uniforms& u [[buffer(4)]],
-               device const float4* colors [[buffer(5)]],
+               device const Appearance* appearance [[buffer(5)]],
                constant float* cam_fovy [[buffer(6)]]) {
     uint image = u.first_image + iid;
     uint env = image / u.nview;
     uint view = image % u.nview;
     Vtx v = verts[vid];
     Pose g = geoms[env * u.ngeom + v.geom];
+    Appearance ap = appearance[env * u.ngeom + v.geom];
+    float3 s = float3(ap.scale[0], ap.scale[1], ap.scale[2]);
     float3x3 R = rot(g);
-    float3 world = R * float3(v.pos[0], v.pos[1], v.pos[2]) + float3(g.pos[0], g.pos[1], g.pos[2]);
-    float3 nworld = R * float3(v.normal[0], v.normal[1], v.normal[2]);
+    float3 world = R * (float3(v.pos[0], v.pos[1], v.pos[2]) * s) + float3(g.pos[0], g.pos[1], g.pos[2]);
+    // normals transform by the inverse scale
+    float3 nworld = R * normalize(float3(v.normal[0], v.normal[1], v.normal[2]) / max(s, float3(1e-6f)));
 
     View vw = views[view];
     Pose c = vw.scene_cam >= 0 ? cams[env * u.ncam + vw.scene_cam] : vw.fixed;
@@ -89,7 +98,10 @@ vertex VOut vs(uint vid [[vertex_id]],
     o.layer = iid;
     o.normal_cam = transpose(C) * nworld;
     o.depth = -pc.z;
-    o.color = colors[v.geom];
+    o.color = ap.rgba;
+    if (ap.rgba.a <= 0.0f) {
+        o.position = float4(0.0f, 0.0f, -2.0f, 1.0f); // hidden in this env: clipped away
+    }
     o.seg = int(v.geom);
     o.flags = v.flags;
     o.local_xy = float2(v.pos[0], v.pos[1]);

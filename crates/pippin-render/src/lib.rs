@@ -14,7 +14,7 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSString;
 use objc2_metal::*;
-use pippin_env::{Frames, Pose, RenderConfig, Renderer, Scene, ViewSource};
+use pippin_env::{Appearance, Frames, Pose, RenderConfig, Renderer, Scene, ViewSource};
 
 /// Metal's limit on render target array slices.
 const MAX_LAYERS: usize = 2048;
@@ -56,12 +56,14 @@ pub struct MetalRenderer {
     readback: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     depth_state: Retained<ProtocolObject<dyn MTLDepthStencilState>>,
     verts: Buffer,
-    colors: Buffer,
+    /// Scene default appearance per geom, used when a frame supplies none.
+    base_appearance: Vec<Appearance>,
     views: Buffer,
     cam_fovy: Buffer,
     // grow on demand
     geom_poses: Option<Buffer>,
     cam_poses: Option<Buffer>,
+    appearance: Option<Buffer>,
     targets: Option<(usize, [Texture; 4])>,
     /// Output buffers per slot: (images capacity, [rgba, depth, seg]).
     out: Vec<Option<(usize, [Buffer; 3])>>,
@@ -133,7 +135,8 @@ impl MetalRenderer {
         let depth_state = device.newDepthStencilStateWithDescriptor(&ds).ok_or("depth state")?;
 
         let mesh = mesh::build_indexed(scene);
-        let colors: Vec<[f32; 4]> = scene.geoms.iter().map(|g| g.rgba).collect();
+        let base_appearance: Vec<Appearance> =
+            scene.geoms.iter().map(|g| Appearance { rgba: g.rgba, scale: [1.0; 3], pad: 0.0 }).collect();
         let views: Vec<GpuView> = config
             .views
             .iter()
@@ -150,7 +153,7 @@ impl MetalRenderer {
             nindex: mesh.indices.len(),
             indices: buffer_from(&device, &mesh.indices)?,
             verts: buffer_from(&device, &mesh.vertices)?,
-            colors: buffer_from(&device, &colors)?,
+            base_appearance,
             views: buffer_from(&device, &views)?,
             cam_fovy: buffer_from(&device, if fovy.is_empty() { &[45.0f32][..] } else { &fovy })?,
             queue: device.newCommandQueue().ok_or("no queue")?,
@@ -159,6 +162,7 @@ impl MetalRenderer {
             depth_state,
             geom_poses: None,
             cam_poses: None,
+            appearance: None,
             targets: None,
             out: vec![],
             config,
@@ -172,6 +176,7 @@ impl MetalRenderer {
         if self.geom_poses.as_ref().is_none_or(|b| b.length() < nenv * self.ngeom * pose) {
             self.geom_poses = Some(new_buffer(&self.device, nenv * self.ngeom * pose)?);
             self.cam_poses = Some(new_buffer(&self.device, nenv * self.ncam.max(1) * pose)?);
+            self.appearance = Some(new_buffer(&self.device, nenv * self.ngeom * std::mem::size_of::<Appearance>())?);
         }
         let layers = nimg.min(MAX_LAYERS);
         if self.targets.as_ref().is_none_or(|(n, _)| *n < layers) {
@@ -223,15 +228,33 @@ impl Renderer for MetalRenderer {
         &self.config
     }
 
-    fn render(&mut self, slot: usize, nenv: usize, geoms: &[Pose], cams: &[Pose]) -> Result<Frames<'_>, String> {
+    fn render(
+        &mut self,
+        slot: usize,
+        nenv: usize,
+        geoms: &[Pose],
+        cams: &[Pose],
+        appearance: Option<&[Appearance]>,
+    ) -> Result<Frames<'_>, String> {
         if geoms.len() != nenv * self.ngeom || cams.len() != nenv * self.ncam {
             return Err(format!("expected {} geom and {} camera poses", nenv * self.ngeom, nenv * self.ncam));
+        }
+        if appearance.is_some_and(|a| a.len() != nenv * self.ngeom) {
+            return Err(format!("expected {} appearance entries", nenv * self.ngeom));
         }
         self.ensure_capacity(slot, nenv)?;
         let gp = self.geom_poses.as_ref().unwrap();
         let cp = self.cam_poses.as_ref().unwrap();
         write(gp, geoms);
         write(cp, cams);
+        let ap = self.appearance.as_ref().unwrap();
+        match appearance {
+            Some(a) => write(ap, a),
+            None => {
+                let defaults: Vec<Appearance> = (0..nenv).flat_map(|_| self.base_appearance.iter().copied()).collect();
+                write(ap, &defaults);
+            }
+        }
 
         let (w, h) = (self.config.width, self.config.height);
         let nview = self.config.views.len();
@@ -286,7 +309,7 @@ impl Renderer for MetalRenderer {
                 enc.setVertexBuffer_offset_atIndex(Some(cp), 0, 2);
                 enc.setVertexBuffer_offset_atIndex(Some(&self.views), 0, 3);
                 enc.setVertexBytes_length_atIndex(NonNull::from(&u).cast::<c_void>(), std::mem::size_of::<Uniforms>(), 4);
-                enc.setVertexBuffer_offset_atIndex(Some(&self.colors), 0, 5);
+                enc.setVertexBuffer_offset_atIndex(Some(ap), 0, 5);
                 enc.setVertexBuffer_offset_atIndex(Some(&self.cam_fovy), 0, 6);
                 if self.nindex > 0 {
                     enc.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount(

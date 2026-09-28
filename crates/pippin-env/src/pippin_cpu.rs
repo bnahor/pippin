@@ -1,16 +1,22 @@
 //! Physics backend: Pippin's CPU engine, stepping environments across cores.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use pippin::math::{Mat3, Quat, Real, Vec3};
 use pippin::model::GeomType;
+use pippin::params::Param;
 use pippin::{forward, Data, Model};
 use rayon::prelude::*;
 
-use crate::{check_len, CameraDesc, Dims, Field, GeomVisual, Mesh, Physics, Pose, Scene, Shape};
+use crate::{check_len, Appearance, CameraDesc, Dims, Field, GeomVisual, Mesh, Physics, Pose, Scene, Shape};
 
 pub struct PippinCpu {
+    /// Base model; defines the scene and dimensions shared by all envs.
     pub model: Model,
+    /// Per-environment model. Environments share the base model until a
+    /// parameter is changed for them (copy on write; meshes stay shared).
+    pub models: Vec<Arc<Model>>,
     pub envs: Vec<Data>,
 }
 
@@ -19,7 +25,8 @@ impl PippinCpu {
         pippin::threads::init();
         let mut proto = Data::new(&model);
         forward::kinematics(&model, &mut proto);
-        PippinCpu { envs: vec![proto; n], model }
+        let shared = Arc::new(model.clone());
+        PippinCpu { envs: vec![proto; n], models: vec![shared; n], model }
     }
 
     pub fn from_file(path: &str, n: usize) -> Result<PippinCpu, pippin::mjcf::MjcfError> {
@@ -85,20 +92,20 @@ impl Physics for PippinCpu {
                 triangles: t.triangles.clone(),
             })
             .collect();
-        Scene { geoms, meshes, cameras }
+        Scene { bodies: m.body_names.clone(), geoms, meshes, cameras }
     }
 
     fn step(&mut self, envs: Range<usize>, nstep: usize) {
-        let m = &self.model;
         let chunk = (envs.len() / (4 * rayon::current_num_threads())).max(1);
-        self.envs[envs].par_chunks_mut(chunk).for_each(|ds| {
+        let models = &self.models[envs.clone()];
+        self.envs[envs].par_chunks_mut(chunk).zip(models.par_chunks(chunk)).for_each(|(ds, ms)| {
             for _ in 0..nstep {
-                for d in ds.iter_mut() {
+                for (d, m) in ds.iter_mut().zip(ms) {
                     forward::step(m, d);
                 }
             }
             // keep poses in sync with the new state for rendering
-            for d in ds.iter_mut() {
+            for (d, m) in ds.iter_mut().zip(ms) {
                 forward::kinematics(m, d);
             }
         });
@@ -107,8 +114,45 @@ impl Physics for PippinCpu {
     fn reset(&mut self, envs: &[usize]) {
         for &i in envs {
             let d = &mut self.envs[i];
-            d.reset(&self.model);
-            forward::kinematics(&self.model, d);
+            d.reset(&self.models[i]);
+            forward::kinematics(&self.models[i], d);
+        }
+    }
+
+    fn set_param(&mut self, p: Param, id: usize, envs: Range<usize>, values: &[f64]) -> Result<(), String> {
+        let w = p.width_in(&self.model);
+        check_len("set_param", values.len(), &envs, w);
+        // validate against the base model first so no env is left half-updated
+        self.model.clone().set_param(p, id, &values[..w])?;
+        for (i, v) in envs.zip(values.chunks(w)) {
+            Arc::make_mut(&mut self.models[i]).set_param(p, id, v)?;
+        }
+        Ok(())
+    }
+
+    fn get_param(&self, p: Param, id: usize, envs: Range<usize>, out: &mut [f64]) -> Result<(), String> {
+        let w = p.width_in(&self.model);
+        check_len("get_param", out.len(), &envs, w);
+        if id >= p.count(&self.model) {
+            return Err(format!("{p:?}: id {id} out of range"));
+        }
+        for (i, o) in envs.zip(out.chunks_mut(w)) {
+            o.copy_from_slice(&self.models[i].get_param(p, id));
+        }
+        Ok(())
+    }
+
+    fn appearance(&self, envs: Range<usize>, out: &mut [Appearance]) {
+        let ng = self.model.ngeom();
+        check_len("appearance", out.len(), &envs, ng);
+        for (k, i) in envs.enumerate() {
+            let m = &self.models[i];
+            for g in 0..ng {
+                let base = self.model.geom_size[g];
+                let size = m.geom_size[g];
+                let scale = std::array::from_fn(|a| if base[a] > 0.0 { (size[a] / base[a]) as f32 } else { 1.0 });
+                out[k * ng + g] = Appearance { rgba: m.geom_rgba[g], scale, pad: 0.0 };
+            }
         }
     }
 
@@ -129,8 +173,8 @@ impl Physics for PippinCpu {
         if w == 0 {
             return;
         }
-        let m = &self.model;
-        for (d, s) in self.envs[envs].iter_mut().zip(src.chunks(w)) {
+        let models = &self.models[envs.clone()];
+        for ((d, s), m) in self.envs[envs].iter_mut().zip(src.chunks(w)).zip(models) {
             match f {
                 Field::Qpos => d.qpos.copy_from_slice(s),
                 Field::Qvel => d.qvel.copy_from_slice(s),

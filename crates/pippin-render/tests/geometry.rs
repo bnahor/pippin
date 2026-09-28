@@ -17,7 +17,7 @@ fn geom(shape: Shape, size: [f32; 3]) -> GeomVisual {
 
 /// Render one geom from a camera `dist` above it, looking down.
 fn render(shape: Shape, size: [f32; 3], pose: Pose, dist: f32) -> (Vec<f32>, Vec<i32>) {
-    let scene = Scene { geoms: vec![geom(shape, size)], meshes: vec![], cameras: vec![] };
+    let scene = Scene { bodies: vec![], geoms: vec![geom(shape, size)], meshes: vec![], cameras: vec![] };
     let cfg = RenderConfig {
         width: W,
         height: H,
@@ -26,7 +26,7 @@ fn render(shape: Shape, size: [f32; 3], pose: Pose, dist: f32) -> (Vec<f32>, Vec
         far: 100.0,
     };
     let mut r = MetalRenderer::new(&scene, cfg).unwrap();
-    let f = r.render(0, 1, &[pose], &[]).unwrap();
+    let f = r.render(0, 1, &[pose], &[], None).unwrap();
     (f.depth.to_vec(), f.segmentation.to_vec())
 }
 
@@ -108,4 +108,31 @@ fn tilted_box_projection() {
     eprintln!("tilted box: row {row}px (expect ~{:.0}), col {col}px (expect ~{:.0})", 2.0 * h * scale, 2.0 * h * (c + s) * scale);
     assert!(col as f32 > 2.0 * h * (c + s) * px_per_unit(d) * 0.9);
     assert!(row as f32 > 2.0 * h * px_per_unit(d) * 0.9);
+}
+
+#[test]
+fn per_env_appearance_scales_and_colors() {
+    use pippin_env::Appearance;
+    let scene = Scene { bodies: vec![], geoms: vec![geom(Shape::Sphere, [0.1, 0.0, 0.0])], meshes: vec![], cameras: vec![] };
+    let cfg = RenderConfig {
+        width: W,
+        height: H,
+        views: vec![ViewSource::look_at([0.0, 0.0, 3.0], [0.0, 0.0, 0.0], FOVY)],
+        near: 0.01,
+        far: 100.0,
+    };
+    let mut r = MetalRenderer::new(&scene, cfg).unwrap();
+    let ap = [
+        Appearance { rgba: [1.0, 0.0, 0.0, 1.0], scale: [1.0; 3], pad: 0.0 },
+        Appearance { rgba: [0.0, 0.0, 1.0, 1.0], scale: [2.0; 3], pad: 0.0 },
+    ];
+    let poses = [identity([0.0; 3]); 2];
+    let f = r.render(0, 2, &poses, &[], Some(&ap)).unwrap();
+    let px = W * H;
+    let (a, b) = (coverage(&f.segmentation[..px]), coverage(&f.segmentation[px..]));
+    assert!((b / a - 4.0).abs() < 0.3, "2x radius should give ~4x pixels: {a} vs {b}");
+    let center = ((H / 2) * W + W / 2) * 4;
+    let (c0, c1) = (&f.rgba[center..center + 3], &f.rgba[px * 4 + center..px * 4 + center + 3]);
+    assert!(c0[0] > 100 && c0[2] < 30, "env 0 should be red: {c0:?}");
+    assert!(c1[2] > 100 && c1[0] < 30, "env 1 should be blue: {c1:?}");
 }

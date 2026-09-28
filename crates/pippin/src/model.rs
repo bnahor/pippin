@@ -169,10 +169,11 @@ pub struct Model {
 
     // ---- meshes ----
     pub mesh_names: Vec<String>,
-    /// Visual mesh as loaded (file coordinates, scaled).
-    pub mesh: Vec<crate::mesh::TriMesh>,
+    /// Visual mesh as loaded (file coordinates, scaled). Shared between
+    /// per-environment model copies.
+    pub mesh: Vec<std::sync::Arc<crate::mesh::TriMesh>>,
     /// Convex hull used for collision and mass.
-    pub mesh_hull: Vec<crate::mesh::TriMesh>,
+    pub mesh_hull: Vec<std::sync::Arc<crate::mesh::TriMesh>>,
 
     // ---- cameras (look along -z, y up, as in MuJoCo) ----
     pub cam_names: Vec<String>,
@@ -255,22 +256,30 @@ impl Model {
             }
         }
 
-        self.geom_rbound = (0..self.ngeom())
-            .map(|g| {
-                let s = self.geom_size[g];
-                match self.geom_type[g] {
-                    GeomType::Plane => Real::INFINITY,
-                    GeomType::Sphere => s[0],
-                    GeomType::Capsule => s[0] + s[1],
-                    GeomType::Box => s.norm(),
-                    GeomType::Cylinder => (s[0] * s[0] + s[1] * s[1]).sqrt(),
-                    GeomType::Mesh => self.mesh_hull[self.geom_dataid[g]].vertices.iter().map(|v| v.norm()).fold(0.0, Real::max),
-                }
-            })
-            .collect();
+        self.geom_rbound = (0..self.ngeom()).map(|g| self.rbound(g)).collect();
         self.geom_shape = (0..self.ngeom()).map(|g| self.build_shape(g)).collect();
+        self.rebuild_collision_pairs();
+        if self.solver.contact_hertz <= 0.0 {
+            // Stiffest spring the integrator can resolve stably, with margin.
+            self.solver.contact_hertz = 0.25 / self.timestep;
+        }
+    }
 
-        // static collision filtering
+    /// Bounding-sphere radius of a geom about its center.
+    pub(crate) fn rbound(&self, g: usize) -> Real {
+        let s = self.geom_size[g];
+        match self.geom_type[g] {
+            GeomType::Plane => Real::INFINITY,
+            GeomType::Sphere => s[0],
+            GeomType::Capsule => s[0] + s[1],
+            GeomType::Box => s.norm(),
+            GeomType::Cylinder => (s[0] * s[0] + s[1] * s[1]).sqrt(),
+            GeomType::Mesh => self.mesh_hull[self.geom_dataid[g]].vertices.iter().map(|v| v.norm()).fold(0.0, Real::max),
+        }
+    }
+
+    /// Static collision filtering (contype/conaffinity, welds, parents).
+    pub fn rebuild_collision_pairs(&mut self) {
         self.collision_pairs.clear();
         for g1 in 0..self.ngeom() {
             for g2 in (g1 + 1)..self.ngeom() {
@@ -279,14 +288,9 @@ impl Model {
                 }
             }
         }
-
-        if self.solver.contact_hertz <= 0.0 {
-            // Stiffest spring the integrator can resolve stably, with margin.
-            self.solver.contact_hertz = 0.25 / self.timestep;
-        }
     }
 
-    fn build_shape(&self, g: usize) -> parry3d_f64::shape::SharedShape {
+    pub(crate) fn build_shape(&self, g: usize) -> parry3d_f64::shape::SharedShape {
         use parry3d_f64::math::Vector;
         use parry3d_f64::shape::SharedShape;
         let s = self.geom_size[g];

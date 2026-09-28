@@ -22,7 +22,7 @@ use std::sync::Mutex;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-use crate::{Dims, Field, Physics, Pose, Renderer, Scene};
+use crate::{Appearance, Dims, Field, Param, Physics, Pose, Renderer, Scene};
 
 /// Frames of one group, borrowed from the renderer's output slot.
 #[derive(Clone, Copy, Debug)]
@@ -74,6 +74,8 @@ pub struct Obs {
 enum PhysJob {
     Step { group: usize, ctrl: Vec<f64> },
     Reset { group: usize },
+    SetParam { p: Param, id: usize, envs: Range<usize>, values: Vec<f64>, reply: Sender<Result<(), String>> },
+    GetParam { p: Param, id: usize, envs: Range<usize>, width: usize, reply: Sender<Result<Vec<f64>, String>> },
     Stop,
 }
 
@@ -81,6 +83,7 @@ struct RenderJob {
     obs: Obs,
     geoms: Vec<Pose>,
     cams: Vec<Pose>,
+    appearance: Vec<Appearance>,
 }
 
 pub struct AsyncEnv {
@@ -117,7 +120,7 @@ impl AsyncEnv {
                     .spawn(move || {
                         while let Ok(mut job) = rx.recv() {
                             let t = Instant::now();
-                            let res = r.render(job.obs.group, job.obs.envs.len(), &job.geoms, &job.cams).map(|f| FrameView {
+                            let res = r.render(job.obs.group, job.obs.envs.len(), &job.geoms, &job.cams, Some(&job.appearance)).map(|f| FrameView {
                                 rgba: f.rgba.as_ptr(),
                                 depth: f.depth.as_ptr(),
                                 segmentation: f.segmentation.as_ptr(),
@@ -148,6 +151,16 @@ impl AsyncEnv {
                         let t = Instant::now();
                         let group = match job {
                             PhysJob::Stop => break,
+                            PhysJob::SetParam { p, id, envs, values, reply } => {
+                                let _ = reply.send(physics.set_param(p, id, envs, &values));
+                                continue;
+                            }
+                            PhysJob::GetParam { p, id, envs, width, reply } => {
+                                let mut out = vec![0.0; envs.len() * width];
+                                let r = physics.get_param(p, id, envs, &mut out).map(|_| out);
+                                let _ = reply.send(r);
+                                continue;
+                            }
                             PhysJob::Step { group, ctrl } => {
                                 let r = groups_c[group].clone();
                                 physics.set(Field::Ctrl, r.clone(), &ctrl);
@@ -177,8 +190,10 @@ impl AsyncEnv {
                             Some(tx) => {
                                 let mut geoms = vec![Pose::default(); n * dims.ngeom];
                                 let mut cams = vec![Pose::default(); n * dims.ncam];
-                                physics.poses(envs, &mut geoms, &mut cams);
-                                tx.send(RenderJob { obs, geoms, cams }).is_ok()
+                                let mut appearance = vec![Appearance::default(); n * dims.ngeom];
+                                physics.poses(envs.clone(), &mut geoms, &mut cams);
+                                physics.appearance(envs, &mut appearance);
+                                tx.send(RenderJob { obs, geoms, cams, appearance }).is_ok()
                             }
                             None => out_tx.send(Ok(obs)).is_ok(),
                         };
@@ -215,6 +230,21 @@ impl AsyncEnv {
     /// Queue a reset of every environment in `group`; produces an observation.
     pub fn reset(&self, group: usize) {
         self.phys_tx.send(PhysJob::Reset { group }).expect("physics thread stopped");
+    }
+
+    /// Set a model parameter for `envs` (applied in order with queued steps;
+    /// blocks until applied). `values` is shaped (envs.len(), width).
+    pub fn set_param(&self, p: Param, id: usize, envs: Range<usize>, values: Vec<f64>) -> Result<(), String> {
+        let (reply, rx) = channel();
+        self.phys_tx.send(PhysJob::SetParam { p, id, envs, values, reply }).map_err(|_| "physics thread stopped")?;
+        rx.recv().map_err(|_| "physics thread stopped".to_string())?
+    }
+
+    /// Read a model parameter for `envs`, shaped (envs.len(), width).
+    pub fn get_param(&self, p: Param, id: usize, envs: Range<usize>, width: usize) -> Result<Vec<f64>, String> {
+        let (reply, rx) = channel();
+        self.phys_tx.send(PhysJob::GetParam { p, id, envs, width, reply }).map_err(|_| "physics thread stopped")?;
+        rx.recv().map_err(|_| "physics thread stopped".to_string())?
     }
 
     /// Block until the next group finishes.

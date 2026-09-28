@@ -2,8 +2,8 @@
 
 use numpy::ndarray::{ArrayView, IxDyn};
 use numpy::prelude::*;
-use numpy::{PyArray, PyArray1, PyReadonlyArray2};
-use pippin_env::{AsyncEnv, Physics, PippinCpu, RenderConfig, Renderer, ViewSource};
+use numpy::{PyArray, PyArray1, PyArray2, PyReadonlyArray2};
+use pippin_env::{AsyncEnv, Param, Physics, PippinCpu, RenderConfig, Renderer, ViewSource};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -11,6 +11,7 @@ use pyo3::types::{PyDict, PyList};
 #[pyclass(name = "AsyncEnv")]
 pub struct PyAsyncEnv {
     env: AsyncEnv,
+    num_envs: usize,
     /// (views, height, width) when rendering.
     image: Option<(usize, usize, usize)>,
 }
@@ -88,7 +89,7 @@ impl PyAsyncEnv {
                 Some(Box::new(pippin_render::MetalRenderer::new(&phys.scene(), cfg).map_err(PyRuntimeError::new_err)?))
             }
         };
-        Ok(PyAsyncEnv { env: AsyncEnv::new(phys, renderer, groups, substeps.max(1)), image })
+        Ok(PyAsyncEnv { env: AsyncEnv::new(phys, renderer, groups, substeps.max(1)), num_envs, image })
     }
 
     #[getter]
@@ -106,6 +107,48 @@ impl PyAsyncEnv {
     #[getter]
     fn nu(&self) -> usize {
         self.env.dims().nu
+    }
+
+    #[getter]
+    fn num_envs(&self) -> usize {
+        self.num_envs
+    }
+    #[getter]
+    fn geom_names(&self) -> Vec<String> {
+        self.env.scene().geoms.iter().map(|g| g.name.clone()).collect()
+    }
+    #[getter]
+    fn body_names(&self) -> Vec<String> {
+        self.env.scene().bodies.clone()
+    }
+
+    /// Set a model parameter per environment, e.g.
+    /// `set_param("geom_friction", geom_id, values)` with values shaped
+    /// (num_envs, width), or (stop - start, width) with `envs=(start, stop)`.
+    /// Names: geom_friction, geom_size, geom_rgba, geom_contype,
+    /// geom_conaffinity, body_mass, body_inertia, body_ipos, dof_damping,
+    /// actuator_gain, actuator_bias, qpos0 (id 0; applied on reset).
+    #[pyo3(signature = (name, id, values, envs = None))]
+    fn set_param(&self, py: Python<'_>, name: &str, id: usize, values: PyReadonlyArray2<f64>, envs: Option<(usize, usize)>) -> PyResult<()> {
+        let p = Param::from_name(name).ok_or_else(|| PyValueError::new_err(format!("unknown parameter '{name}'")))?;
+        let (a, b) = envs.unwrap_or((0, self.num_envs));
+        if a > b || b > self.num_envs {
+            return Err(PyValueError::new_err("envs out of range"));
+        }
+        let v = values.as_slice().map_err(|e| PyValueError::new_err(e.to_string()))?.to_vec();
+        let env = &self.env;
+        py.detach(|| env.set_param(p, id, a..b, v)).map_err(PyValueError::new_err)
+    }
+
+    /// Read a model parameter per environment, shaped (envs, width).
+    #[pyo3(signature = (name, id, envs = None))]
+    fn get_param<'py>(&self, py: Python<'py>, name: &str, id: usize, envs: Option<(usize, usize)>) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        let p = Param::from_name(name).ok_or_else(|| PyValueError::new_err(format!("unknown parameter '{name}'")))?;
+        let (a, b) = envs.unwrap_or((0, self.num_envs));
+        let width = if p == Param::Qpos0 { self.env.dims().nq } else { p.width() };
+        let env = &self.env;
+        let v = py.detach(|| env.get_param(p, id, a..b, width)).map_err(PyValueError::new_err)?;
+        PyArray1::from_vec(py, v).reshape([b - a, width])
     }
 
     /// (start, stop) env indices of a group.

@@ -163,7 +163,8 @@ impl Physics for MujocoPhysics {
                 fovy: unsafe { *m.cam_fovy.add(c) } as f32,
             })
             .collect();
-        Scene { geoms, meshes, cameras }
+        let bodies = (0..m.nbody as usize).map(|b| self.name_of(sys::mjtObj_mjOBJ_BODY, b)).collect();
+        Scene { bodies, geoms, meshes, cameras }
     }
 
     fn step(&mut self, envs: Range<usize>, nstep: usize) {

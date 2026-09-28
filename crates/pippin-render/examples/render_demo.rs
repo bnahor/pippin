@@ -33,7 +33,7 @@ fn main() {
     let mut g = vec![Pose::default(); n * d.ngeom];
     let mut c = vec![Pose::default(); n * d.ncam];
     phys.poses(0..n, &mut g, &mut c);
-    let frames = r.render(0, n, &g, &c).unwrap();
+    let frames = r.render(0, n, &g, &c, None).unwrap();
 
     // contact sheet: rows = envs, cols = views
     let (w, h, nv) = (cfg.width, cfg.height, cfg.views.len());
