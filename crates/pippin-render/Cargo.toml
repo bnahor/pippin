@@ -1,0 +1,16 @@
+[package]
+name = "pippin-render"
+description = "Batched Metal rasterizer for pippin-env scenes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+pippin-env = { path = "../pippin-env" }
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-metal = "0.3"
+
+[dev-dependencies]
+pippin-mujoco = { path = "../pippin-mujoco" }

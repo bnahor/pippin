@@ -92,6 +92,7 @@ pub struct Scene {
 
 /// World pose: position and row-major rotation matrix. Cameras look along
 /// their local -z with +y up.
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Pose {
     pub pos: [f32; 3],
@@ -118,6 +119,62 @@ pub trait Physics: Send {
     /// World poses for `envs`: geoms into `geoms` (envs x ngeom) and cameras
     /// into `cams` (envs x ncam). Poses reflect the most recent step.
     fn poses(&self, envs: Range<usize>, geoms: &mut [Pose], cams: &mut [Pose]);
+}
+
+/// Where a rendered view comes from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ViewSource {
+    /// A camera defined in the scene (may be attached to a moving body).
+    Scene(usize),
+    /// A fixed world-space camera.
+    Fixed { pose: Pose, fovy: f32 },
+}
+
+impl ViewSource {
+    /// Fixed camera at `eye` looking at `target` with +z up.
+    pub fn look_at(eye: [f32; 3], target: [f32; 3], fovy: f32) -> ViewSource {
+        let sub = |a: [f32; 3], b: [f32; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+        let cross = |a: [f32; 3], b: [f32; 3]| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+        let norm = |a: [f32; 3]| {
+            let n = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt().max(1e-12);
+            [a[0] / n, a[1] / n, a[2] / n]
+        };
+        // camera looks along -z: z axis points from target to eye
+        let z = norm(sub(eye, target));
+        let up = if z[2].abs() > 0.99 { [0.0, 1.0, 0.0] } else { [0.0, 0.0, 1.0] };
+        let x = norm(cross(up, z));
+        let y = cross(z, x);
+        let mat = [x[0], y[0], z[0], x[1], y[1], z[1], x[2], y[2], z[2]];
+        ViewSource::Fixed { pose: Pose { pos: eye, mat }, fovy }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RenderConfig {
+    pub width: usize,
+    pub height: usize,
+    /// Views rendered for every environment.
+    pub views: Vec<ViewSource>,
+    pub near: f32,
+    pub far: f32,
+}
+
+/// Batched images, shaped (envs, views, height, width[, 4]).
+pub struct Frames<'a> {
+    pub rgba: &'a [u8],
+    /// Linear depth along the view axis, meters (`far` for background).
+    pub depth: &'a [f32],
+    /// Geom id per pixel, -1 for background.
+    pub segmentation: &'a [i32],
+}
+
+/// Renders batches of environments from poses alone; independent of physics.
+pub trait Renderer: Send {
+    fn name(&self) -> &str;
+    fn config(&self) -> &RenderConfig;
+    /// Render `nenv` environments given their geom poses (nenv x ngeom) and
+    /// scene camera poses (nenv x ncam).
+    fn render(&mut self, nenv: usize, geoms: &[Pose], cams: &[Pose]) -> Result<Frames<'_>, String>;
 }
 
 /// Check buffer sizes shared by all backends.

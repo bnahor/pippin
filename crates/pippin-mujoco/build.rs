@@ -56,29 +56,26 @@ fn find_lib(root: &Path) -> PathBuf {
     panic!("libmujoco not found under {}", root.display());
 }
 
-/// Directory to put on the rpath so the library's install name resolves.
-/// The pip wheel ships `libmujoco.X.dylib` flat while its install name is
-/// `@rpath/mujoco.framework/Versions/A/libmujoco.X.dylib`; in that case build a
-/// matching symlink tree in OUT_DIR.
-fn rpath_for(lib: &Path, libdir: &Path) -> PathBuf {
-    let install_name = Command::new("otool")
-        .args(["-D", &lib.to_string_lossy()])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .and_then(|s| s.lines().nth(1).map(|l| l.trim().to_string()));
-    let Some(rel) = install_name.as_deref().and_then(|n| n.strip_prefix("@rpath/")) else {
-        return libdir.to_path_buf();
-    };
-    if libdir.join(rel).exists() {
-        return libdir.to_path_buf();
+/// Copy the library into OUT_DIR as `libmujoco.dylib` with an absolute
+/// install name, so every binary linking this crate (tests, examples, the
+/// Python extension) finds it without rpath setup. Re-signed ad hoc because
+/// editing the install name invalidates the signature on Apple Silicon.
+fn stage_library(lib: &Path) -> PathBuf {
+    let dir = PathBuf::from(env::var("OUT_DIR").unwrap()).join("lib");
+    std::fs::create_dir_all(&dir).unwrap();
+    let ext = if cfg!(target_os = "macos") { "dylib" } else { "so" };
+    let dst = dir.join(format!("libmujoco.{ext}"));
+    std::fs::copy(lib, &dst).unwrap();
+    if cfg!(target_os = "macos") {
+        let run = |cmd: &str, args: &[&str]| {
+            let ok = Command::new(cmd).args(args).status().map(|s| s.success()).unwrap_or(false);
+            assert!(ok, "{cmd} {args:?} failed");
+        };
+        let d = dst.to_string_lossy().into_owned();
+        run("install_name_tool", &["-id", &d, &d]);
+        run("codesign", &["-f", "-s", "-", &d]);
     }
-    let root = PathBuf::from(env::var("OUT_DIR").unwrap()).join("rpath");
-    let link = root.join(rel);
-    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
-    let _ = std::fs::remove_file(&link);
-    std::os::unix::fs::symlink(lib, &link).unwrap();
-    root
+    dir
 }
 
 fn main() {
@@ -87,11 +84,10 @@ fn main() {
     let root = find_root();
     let include = root.join("include");
     let lib = find_lib(&root);
-    let libdir = lib.parent().unwrap();
-    println!("cargo:rustc-link-arg={}", lib.display());
-    let rpath = rpath_for(&lib, libdir);
-    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", rpath.display());
-    println!("cargo:libdir={}", rpath.display());
+    let dir = stage_library(&lib);
+    println!("cargo:rustc-link-search=native={}", dir.display());
+    println!("cargo:rustc-link-lib=dylib=mujoco");
+    println!("cargo:libdir={}", dir.display());
 
     let bindings = bindgen::Builder::default()
         .header(include.join("mujoco/mujoco.h").to_string_lossy())
