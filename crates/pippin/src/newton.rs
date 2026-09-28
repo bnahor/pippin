@@ -13,6 +13,7 @@
 
 use crate::data::Data;
 use crate::math::{cholesky, cholesky_solve, Real};
+use crate::simd;
 use crate::model::{JointType, Model};
 use crate::solver::point_jac;
 
@@ -31,10 +32,12 @@ fn impedance(solimp: &[Real; 5], pos: Real) -> Real {
     if x >= 1.0 || dmin == dmax {
         return dmax;
     }
+    // power 2 is the default; avoid libm pow() on that hot path
+    let pw = |b: Real, e: Real| if e == 2.0 { b * b } else if e == 1.0 { b } else { b.powf(e) };
     let y = if x <= mid {
-        x.powf(power) / mid.powf(power - 1.0)
+        pw(x, power) / pw(mid, power - 1.0)
     } else {
-        1.0 - (1.0 - x).powf(power) / (1.0 - mid).powf(power - 1.0)
+        1.0 - pw(1.0 - x, power) / pw(1.0 - mid, power - 1.0)
     };
     (dmin + y * (dmax - dmin)).clamp(1e-4, 0.9999)
 }
@@ -54,7 +57,7 @@ impl Workspace<'_> {
         let nv = self.nv;
         for i in 0..nv {
             let row = &self.qm[i * nv..(i + 1) * nv];
-            y[i] = row.iter().zip(x).map(|(a, b)| a * b).sum::<Real>() + self.damp_h[i] * x[i];
+            y[i] = simd::dot(row, x) + self.damp_h[i] * x[i];
         }
     }
 
@@ -63,7 +66,7 @@ impl Workspace<'_> {
     }
 
     fn dot_j(&self, r: usize, x: &[Real]) -> Real {
-        self.jrow(r).iter().zip(x).map(|(a, b)| a * b).sum()
+        simd::dot(self.jrow(r), x)
     }
 
     /// Total cost at `a`; also fills `jar` = J a - aref.

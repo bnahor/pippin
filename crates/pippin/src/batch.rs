@@ -14,6 +14,7 @@ pub struct Batch {
 
 impl Batch {
     pub fn new(model: Model, n: usize) -> Batch {
+        crate::threads::init();
         let proto = Data::new(&model);
         Batch { envs: vec![proto; n], model }
     }

@@ -56,6 +56,7 @@ unsafe fn arr<'a, T>(ptr: *const T, offset: usize, n: usize) -> &'a [T] {
 
 impl MujocoPhysics {
     pub fn from_file(path: &str, n: usize) -> Result<MujocoPhysics, MujocoError> {
+        pippin_env::init_threads();
         let cpath = CString::new(path).map_err(|e| MujocoError(e.to_string()))?;
         let mut err = [0 as c_char; 1000];
         let m = unsafe { sys::mj_loadXML(cpath.as_ptr(), std::ptr::null(), err.as_mut_ptr(), err.len() as i32) };

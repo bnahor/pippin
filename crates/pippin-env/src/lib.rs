@@ -13,6 +13,8 @@ pub mod pippin_cpu;
 
 pub use pipeline::{AsyncEnv, FrameView, Obs};
 pub use pippin_cpu::PippinCpu;
+/// Configure worker threads for the host CPU (idempotent).
+pub use pippin::threads::init as init_threads;
 
 /// State arrays a backend exposes, shaped (envs, width).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -16,6 +16,7 @@ pub struct PippinCpu {
 
 impl PippinCpu {
     pub fn new(model: Model, n: usize) -> PippinCpu {
+        pippin::threads::init();
         let mut proto = Data::new(&model);
         forward::kinematics(&model, &mut proto);
         PippinCpu { envs: vec![proto; n], model }

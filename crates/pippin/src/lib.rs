@@ -11,7 +11,9 @@ pub mod math;
 pub mod mjcf;
 pub mod model;
 pub mod newton;
+pub mod simd;
 pub mod solver;
+pub mod threads;
 
 pub use batch::Batch;
 pub use data::Data;

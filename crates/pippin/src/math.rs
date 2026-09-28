@@ -412,22 +412,21 @@ impl SpatialInertia {
 /// In-place dense Cholesky (lower) of an n x n row-major SPD matrix.
 /// Returns false if the matrix is not positive definite.
 pub fn cholesky(a: &mut [Real], n: usize) -> bool {
+    use crate::simd::dot;
     for j in 0..n {
-        let mut d = a[j * n + j];
-        for k in 0..j {
-            d -= a[j * n + k] * a[j * n + k];
-        }
+        let (head, tail) = a.split_at_mut((j + 1) * n);
+        let (rj, diag) = head[j * n..].split_at_mut(j);
+        let rj: &[Real] = rj;
+        let d = diag[0] - dot(rj, rj);
         if d <= 0.0 {
             return false;
         }
         let d = d.sqrt();
-        a[j * n + j] = d;
+        diag[0] = d;
+        let inv = 1.0 / d;
         for i in (j + 1)..n {
-            let mut s = a[i * n + j];
-            for k in 0..j {
-                s -= a[i * n + k] * a[j * n + k];
-            }
-            a[i * n + j] = s / d;
+            let ri = &mut tail[(i - j - 1) * n..(i - j) * n];
+            ri[j] = (ri[j] - dot(&ri[..j], rj)) * inv;
         }
     }
     true
@@ -435,19 +434,17 @@ pub fn cholesky(a: &mut [Real], n: usize) -> bool {
 
 /// Solve L L^T x = b in place given the lower factor from [`cholesky`].
 pub fn cholesky_solve(l: &[Real], n: usize, x: &mut [Real]) {
+    use crate::simd::{axpy, dot};
+    // forward: L y = b, row-wise dot products
     for i in 0..n {
-        let mut s = x[i];
-        for k in 0..i {
-            s -= l[i * n + k] * x[k];
-        }
-        x[i] = s / l[i * n + i];
+        x[i] = (x[i] - dot(&l[i * n..i * n + i], &x[..i])) / l[i * n + i];
     }
+    // backward: L^T x = y, as row-wise axpy updates so memory access stays
+    // contiguous (the column walk of L^T would stride by n)
     for i in (0..n).rev() {
-        let mut s = x[i];
-        for k in (i + 1)..n {
-            s -= l[k * n + i] * x[k];
-        }
-        x[i] = s / l[i * n + i];
+        x[i] /= l[i * n + i];
+        let xi = x[i];
+        axpy(-xi, &l[i * n..i * n + i], &mut x[..i]);
     }
 }
 
