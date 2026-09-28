@@ -1,0 +1,14 @@
+[package]
+name = "pippin-metal"
+description = "Metal (Apple GPU) backend for the Pippin simulator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+pippin = { path = "../pippin" }
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-metal = "0.3"
+thiserror = "2"
