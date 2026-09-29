@@ -76,7 +76,7 @@ impl Physics for PippinCpu {
                 size: m.geom_size[g].0.map(|x| x as f32),
                 rgba: m.geom_rgba[g],
                 body: m.geom_body[g],
-                group: 0,
+                group: m.geom_group[g],
             })
             .collect();
         let cameras = (0..m.cam_body.len())

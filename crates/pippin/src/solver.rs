@@ -19,6 +19,8 @@ pub enum RowKind {
     Normal { sep: Real },
     /// Box-bounded by mu * lambda of row `normal`.
     Friction { normal: usize, mu: Real },
+    /// Two-sided (equality): lambda unbounded. `sep` is the residual.
+    Bilateral { sep: Real },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -106,6 +108,21 @@ pub fn solve(m: &Model, d: &mut Data, v: &mut [Real], v_pos: &mut Vec<Real>) {
         }
     }
 
+    for e in 0..m.eq_joint1.len() {
+        let (j1, j2) = (m.eq_joint1[e], m.eq_joint2[e]);
+        let c = m.eq_polycoef[e];
+        let q1 = d.qpos[m.jnt_qposadr[j1]] - m.qpos0[m.jnt_qposadr[j1]];
+        let idx = push_row(&mut jac);
+        jac[idx * nv + m.jnt_dofadr[j1]] += 1.0;
+        let mut poly = c[0];
+        if j2 != usize::MAX {
+            let x = d.qpos[m.jnt_qposadr[j2]] - m.qpos0[m.jnt_qposadr[j2]];
+            poly = c[0] + x * (c[1] + x * (c[2] + x * (c[3] + x * c[4])));
+            jac[idx * nv + m.jnt_dofadr[j2]] -= c[1] + x * (2.0 * c[2] + x * (3.0 * c[3] + x * 4.0 * c[4]));
+        }
+        rows.push(Row { kind: RowKind::Bilateral { sep: q1 - poly }, inv_a: 0.0, contact: usize::MAX });
+    }
+
     let nr = rows.len();
     v_pos.clear();
     v_pos.extend_from_slice(v);
@@ -167,6 +184,14 @@ pub fn solve(m: &Model, d: &mut Data, v: &mut [Real], v_pos: &mut Vec<Real>) {
                     let delta = -row.inv_a * ms * (jv + bias) - is * lambda[r];
                     (lambda[r] + delta).max(0.0)
                 }
+                RowKind::Bilateral { sep } => {
+                    let (bias, ms, is) = if use_bias {
+                        ((sc.bias_rate * sep).clamp(-MAX_BIAS_VELOCITY, MAX_BIAS_VELOCITY), sc.mass_scale, sc.impulse_scale)
+                    } else {
+                        (0.0, 1.0, 0.0)
+                    };
+                    lambda[r] - row.inv_a * ms * (jv + bias) - is * lambda[r]
+                }
                 RowKind::Friction { normal, mu } => {
                     let bound = mu * lambda[normal];
                     (lambda[r] - row.inv_a * jv).clamp(-bound, bound)
@@ -213,6 +238,7 @@ pub fn solve(m: &Model, d: &mut Data, v: &mut [Real], v_pos: &mut Vec<Real>) {
             let slot = match rows[r].kind {
                 RowKind::Normal { .. } => 0,
                 RowKind::Friction { normal, .. } => r - normal,
+                RowKind::Bilateral { .. } => continue, // not a contact row
             };
             d.scratch.prev_lambda[c][slot] = lambda[r];
         }

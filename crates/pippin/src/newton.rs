@@ -23,6 +23,16 @@ pub struct NRow {
     pub aref: Real,
     /// Constraint stiffness weight D = 1 / R.
     pub d: Real,
+    /// Equality (two-sided, always active) rather than inequality.
+    pub bilateral: bool,
+}
+
+impl NRow {
+    /// Whether the row contributes cost at residual `r = J a - aref`.
+    #[inline]
+    pub fn active(&self, r: Real) -> bool {
+        self.bilateral || r < 0.0
+    }
 }
 
 /// MuJoCo impedance curve: how "hard" a constraint is at violation `pos`.
@@ -78,7 +88,7 @@ impl Workspace<'_> {
         let mut c = 0.5 * tmp.iter().zip(tmp2.iter()).map(|(x, y)| x * y).sum::<Real>();
         for r in 0..self.nr {
             jar[r] = self.dot_j(r, a) - self.rows[r].aref;
-            if jar[r] < 0.0 {
+            if self.rows[r].active(jar[r]) {
                 c += 0.5 * self.rows[r].d * jar[r] * jar[r];
             }
         }
@@ -145,23 +155,51 @@ fn build_rows(m: &Model, d: &mut Data) -> usize {
         }
     }
 
+    // joint equality: (q1 - q1_0) - poly(q2 - q2_0) = 0, with its own softness
+    let n_ineq = pos.len();
+    let mut eq_params: Vec<([Real; 2], [Real; 5])> = vec![];
+    for e in 0..m.eq_joint1.len() {
+        let (j1, j2) = (m.eq_joint1[e], m.eq_joint2[e]);
+        let c = m.eq_polycoef[e];
+        let q1 = d.qpos[m.jnt_qposadr[j1]] - m.qpos0[m.jnt_qposadr[j1]];
+        let (mut poly, mut dpoly) = (c[0], 0.0);
+        if j2 != usize::MAX {
+            let x = d.qpos[m.jnt_qposadr[j2]] - m.qpos0[m.jnt_qposadr[j2]];
+            poly = c[0] + x * (c[1] + x * (c[2] + x * (c[3] + x * c[4])));
+            dpoly = c[1] + x * (2.0 * c[2] + x * (3.0 * c[3] + x * 4.0 * c[4]));
+        }
+        let start = jac.len();
+        jac.resize(start + nv, 0.0);
+        jac[start + m.jnt_dofadr[j1]] += 1.0;
+        let mut dg = m.dof_invweight[m.jnt_dofadr[j1]];
+        if j2 != usize::MAX {
+            jac[start + m.jnt_dofadr[j2]] -= dpoly;
+            dg += m.dof_invweight[m.jnt_dofadr[j2]];
+        }
+        pos.push(q1 - poly);
+        diag.push(dg);
+        eq_params.push((m.eq_solref[e], m.eq_solimp[e]));
+    }
+
     let nr = pos.len();
     if nr == 0 {
         return 0;
     }
 
     // reference acceleration and regularization per row
-    let [tc, dr] = opt.solref;
-    let tc = tc.max(2.0 * h);
-    let dmax = opt.solimp[1];
-    let b = 2.0 / (dmax * tc);
-    let k = 1.0 / (dmax * dmax * tc * tc * dr * dr);
     for r in 0..nr {
+        let bilateral = r >= n_ineq;
+        let (solref, solimp) = if bilateral { eq_params[r - n_ineq] } else { (opt.solref, opt.solimp) };
+        let [tc, dr] = solref;
+        let tc = tc.max(2.0 * h);
+        let dmax = solimp[1];
+        let b = 2.0 / (dmax * tc);
+        let k = 1.0 / (dmax * dmax * tc * tc * dr * dr);
         let jr = &jac[r * nv..(r + 1) * nv];
         let vel: Real = jr.iter().zip(&d.qvel).map(|(a, b)| a * b).sum();
-        let imp = impedance(&opt.solimp, pos[r]);
+        let imp = impedance(&solimp, pos[r]);
         let reg = ((1.0 - imp) / imp * diag[r]).max(1e-15);
-        rows.push(NRow { aref: -b * vel - k * imp * pos[r], d: 1.0 / reg });
+        rows.push(NRow { aref: -b * vel - k * imp * pos[r], d: 1.0 / reg, bilateral });
     }
     nr
 }
@@ -218,7 +256,7 @@ pub fn solve(m: &Model, d: &mut Data, a: &mut [Real]) {
         w.mul_m(tmp, grad);
         for r in 0..nr {
             jar[r] = w.dot_j(r, a) - w.rows[r].aref;
-            if jar[r] < 0.0 {
+            if w.rows[r].active(jar[r]) {
                 if r < 128 {
                     active |= 1 << r;
                 }
@@ -242,7 +280,7 @@ pub fn solve(m: &Model, d: &mut Data, a: &mut [Real]) {
             hess[i * nv + i] += w.damp_h[i];
         }
         for r in 0..nr {
-            if jar[r] < 0.0 {
+            if w.rows[r].active(jar[r]) {
                 let dr = w.rows[r].d;
                 let jr = w.jrow(r);
                 for i in 0..nv {
@@ -275,7 +313,7 @@ pub fn solve(m: &Model, d: &mut Data, a: &mut [Real]) {
             let (mut d1, mut d2) = (al * mpp + mpg, mpp);
             for r in 0..nr {
                 let v = jar[r] + al * jp[r];
-                if v < 0.0 {
+                if w.rows[r].active(v) {
                     let dq = w.rows[r].d * jp[r];
                     d1 += dq * v;
                     d2 += dq * jp[r];
@@ -315,7 +353,7 @@ pub fn solve(m: &Model, d: &mut Data, a: &mut [Real]) {
     // constraint force at the solution: qfrc_c = -J' D (J a - aref)_-
     for r in 0..nr {
         let v = w.dot_j(r, a) - w.rows[r].aref;
-        if v < 0.0 {
+        if w.rows[r].active(v) {
             let f = -w.rows[r].d * v;
             for (q, j) in d.qfrc_constraint.iter_mut().zip(w.jrow(r)) {
                 *q += f * j;

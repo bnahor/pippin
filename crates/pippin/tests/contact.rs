@@ -182,3 +182,25 @@ fn rollout_matches_step_loop() {
         }
     }
 }
+
+#[test]
+fn reset_state_param_does_not_move_the_kinematic_reference() {
+    // a hinge with ref=30deg: qpos = ref means zero rotation from the model pose
+    let m0 = mjcf::load_str(
+        r#"<mujoco><worldbody><body name="b"><joint name="h" axis="0 0 1" ref="30"/>
+            <geom type="box" size=".1 .02 .02" pos=".1 0 0" contype="0" conaffinity="0"/></body></worldbody></mujoco>"#,
+    )
+    .unwrap();
+    let mut m = m0.clone();
+    m.set_param(pippin::params::Param::Qpos0, 0, &[1.0]).unwrap();
+    let mut d = Data::new(&m);
+    assert_eq!(d.qpos[0], 1.0, "reset state applied");
+    pippin::forward::kinematics(&m, &mut d);
+    let mut d0 = Data::new(&m0);
+    d0.qpos[0] = 1.0;
+    pippin::forward::kinematics(&m0, &mut d0);
+    let b = m.body_id("b").unwrap();
+    for k in 0..9 {
+        assert!((d.xmat[b].0[k] - d0.xmat[b].0[k]).abs() < 1e-15, "same qpos must give the same pose");
+    }
+}

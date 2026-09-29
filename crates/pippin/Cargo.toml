@@ -20,3 +20,7 @@ libc = "0.2"
 [[example]]
 name = "bench"
 path = "../../benches/bench.rs"
+
+[[example]]
+name = "contacts"
+path = "../../benches/contacts.rs"

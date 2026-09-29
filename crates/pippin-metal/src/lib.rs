@@ -86,6 +86,14 @@ impl MetalSim {
         if model.nv == 0 {
             return Err(MetalError::Unsupported("model has no degrees of freedom".into()));
         }
+        let unsupported = [
+            (model.actuator_moment.iter().any(|mo| mo.len() != 1), "tendon actuator transmissions"),
+            (!model.eq_joint1.is_empty(), "equality constraints"),
+            (model.integrator != pippin::model::Integrator::Euler, "the implicitfast integrator"),
+        ];
+        if let Some((_, what)) = unsupported.iter().find(|(bad, _)| *bad) {
+            return Err(MetalError::Unsupported(format!("the Metal backend does not support {what} yet; use a CPU backend")));
+        }
         if let Some(&(a, b)) =
             model.collision_pairs.iter().find(|&&(a, b)| pippin::collision::needs_general(model.geom_type[a], model.geom_type[b]))
         {

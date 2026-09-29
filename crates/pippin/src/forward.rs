@@ -7,7 +7,7 @@
 use crate::collision::{self, Contact, GeomPose, Hit};
 use crate::data::Data;
 use crate::math::{cholesky, cholesky_solve, Mat3, Quat, Real, Spatial, SpatialInertia, Vec3};
-use crate::model::{JointType, Model, SolverKind};
+use crate::model::{Integrator, JointType, Model, SolverKind};
 use crate::{newton, solver};
 
 /// Positions of bodies, joint frames, geoms, and dof motion subspaces.
@@ -185,10 +185,10 @@ pub fn passive(m: &Model, d: &mut Data) {
 pub fn actuation(m: &Model, d: &mut Data) {
     d.qfrc_actuator.fill(0.0);
     for u in 0..m.nu {
-        let j = m.actuator_joint[u];
         let gear = m.actuator_gear[u];
-        let length = gear * d.qpos[m.jnt_qposadr[j]];
-        let vel = gear * d.qvel[m.jnt_dofadr[j]];
+        let moment = &m.actuator_moment[u];
+        let length = gear * moment.iter().map(|&(j, c)| c * d.qpos[m.jnt_qposadr[j]]).sum::<Real>();
+        let vel = gear * moment.iter().map(|&(j, c)| c * d.qvel[m.jnt_dofadr[j]]).sum::<Real>();
         let mut ctrl = d.ctrl[u];
         if m.actuator_ctrllimited[u] {
             let r = m.actuator_ctrlrange[u];
@@ -196,12 +196,17 @@ pub fn actuation(m: &Model, d: &mut Data) {
         }
         let b = m.actuator_bias[u];
         let mut f = m.actuator_gain[u] * ctrl + b[0] + b[1] * length + b[2] * vel;
+        let mut clamped = false;
         if m.actuator_forcelimited[u] {
             let r = m.actuator_forcerange[u];
+            clamped = f < r[0] || f > r[1];
             f = f.clamp(r[0], r[1]);
         }
         d.actuator_force[u] = f;
-        d.qfrc_actuator[m.jnt_dofadr[j]] += gear * f;
+        d.actuator_clamped[u] = clamped;
+        for &(j, c) in moment {
+            d.qfrc_actuator[m.jnt_dofadr[j]] += gear * c * f;
+        }
     }
 }
 
@@ -316,7 +321,7 @@ pub fn step(m: &Model, d: &mut Data) {
     let nv = m.nv;
     let h = m.timestep;
 
-    let damped = m.dof_damping.iter().any(|&b| b != 0.0);
+    let damped = has_implicit_terms(m);
     let mut smooth = std::mem::take(&mut d.scratch.smooth);
     smooth.clear();
     smooth.extend((0..nv).map(|k| d.qfrc_passive[k] + d.qfrc_actuator[k] + d.qfrc_applied[k] - d.qfrc_bias[k]));
@@ -370,12 +375,58 @@ pub fn step(m: &Model, d: &mut Data) {
 fn factor_mass(m: &Model, d: &mut Data, h: Real) {
     let nv = m.nv;
     d.qm_chol.copy_from_slice(&d.qm);
-    for k in 0..nv {
-        d.qm_chol[k * nv + k] += h * m.dof_damping[k];
-    }
+    add_implicit_terms(m, &d.actuator_clamped, h, &mut d.qm_chol);
     if !cholesky(&mut d.qm_chol, nv) {
         panic!("mass matrix is not positive definite");
     }
+}
+
+/// M += h * D, where D = -d(qfrc)/d(qvel) for the terms treated implicitly:
+/// joint damping always; with `implicitfast`, also actuator velocity
+/// feedback (bias b2), which couples the joints of a tendon transmission.
+/// Saturated actuators (force at its range) have no velocity dependence.
+fn add_implicit_terms(m: &Model, clamped: &[bool], h: Real, mat: &mut [Real]) {
+    let nv = m.nv;
+    for k in 0..nv {
+        mat[k * nv + k] += h * m.dof_damping[k];
+    }
+    if m.integrator == Integrator::ImplicitFast {
+        for u in 0..m.nu {
+            let kv = -m.actuator_bias[u][2] * m.actuator_gear[u] * m.actuator_gear[u];
+            if kv == 0.0 || clamped[u] {
+                continue;
+            }
+            for &(ja, ca) in &m.actuator_moment[u] {
+                for &(jb, cb) in &m.actuator_moment[u] {
+                    let (a, b) = (m.jnt_dofadr[ja], m.jnt_dofadr[jb]);
+                    // like MuJoCo, keep only entries inside the tree sparsity of
+                    // M (a == b or ancestor/descendant): implicitfast drops the
+                    // coupling between sibling branches
+                    if a == b || is_ancestor(m, a, b) || is_ancestor(m, b, a) {
+                        mat[a * nv + b] += h * kv * ca * cb;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Whether dof `a` is a strict ancestor of dof `b` in the kinematic tree.
+fn is_ancestor(m: &Model, a: usize, b: usize) -> bool {
+    let mut k = m.dof_parent[b];
+    while k != usize::MAX {
+        if k == a {
+            return true;
+        }
+        k = m.dof_parent[k];
+    }
+    false
+}
+
+/// Whether the implicit terms are non-zero (so a second factorization is needed).
+fn has_implicit_terms(m: &Model) -> bool {
+    m.dof_damping.iter().any(|&b| b != 0.0)
+        || (m.integrator == Integrator::ImplicitFast && m.actuator_bias.iter().any(|b| b[2] != 0.0))
 }
 
 /// qpos <- qpos (+) h * qvel on the configuration manifold.

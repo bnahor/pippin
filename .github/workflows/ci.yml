@@ -14,5 +14,7 @@ jobs:
           VIRTUAL_ENV: ${{ github.workspace }}/.venv
       - run: uv run maturin develop --release
       - run: uv run python validation/compare_mujoco.py
+      - run: scripts/fetch_assets.sh
       - run: uv run python validation/compare_urdf.py
+      - run: uv run python validation/compare_panda.py
       - run: uv run python -m pytest tests -q

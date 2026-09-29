@@ -33,6 +33,7 @@ struct DefaultClass {
 }
 
 struct Ctx {
+    materials: HashMap<String, [f32; 4]>,
     degrees: bool,
     eulerseq: [u8; 3],
     autolimits: bool,
@@ -174,8 +175,42 @@ pub fn load_str(xml: &str) -> Result<Model, MjcfError> {
 }
 
 /// Load from a string, resolving relative asset paths against `dir`.
-pub fn load_str_in(xml: &str, dir: &Path) -> Result<Model, MjcfError> {
+/// Splice `<include file=.../>` elements (recursively) with the children of
+/// the included file's root element.
+fn expand_includes(xml: &str, dir: &Path, depth: usize) -> Result<String, MjcfError> {
+    if depth > 16 {
+        return invalid("<include> nested too deeply (cycle?)");
+    }
     let doc = Document::parse(xml)?;
+    let mut incs: Vec<(std::ops::Range<usize>, String)> = doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "include")
+        .map(|n| (n.range(), n.attribute("file").unwrap_or("").to_string()))
+        .collect();
+    if incs.is_empty() {
+        return Ok(xml.to_string());
+    }
+    incs.sort_by_key(|(r, _)| std::cmp::Reverse(r.start));
+    let mut out = xml.to_string();
+    for (range, file) in incs {
+        let path = dir.join(&file);
+        let text = std::fs::read_to_string(&path).map_err(|e| MjcfError::Invalid(format!("<include file=\"{file}\">: {e}")))?;
+        let sub_dir = path.parent().unwrap_or(dir).to_path_buf();
+        let text = expand_includes(&text, &sub_dir, depth + 1)?;
+        let sub = Document::parse(&text)?;
+        let root = sub.root_element();
+        let inner = match (root.first_child(), root.last_child()) {
+            (Some(a), Some(b)) => text[a.range().start..b.range().end].to_string(),
+            _ => String::new(),
+        };
+        out.replace_range(range, &inner);
+    }
+    Ok(out)
+}
+
+pub fn load_str_in(xml: &str, dir: &Path) -> Result<Model, MjcfError> {
+    let expanded = expand_includes(xml, dir, 0)?;
+    let doc = Document::parse(&expanded)?;
     let root = doc.root_element();
     if root.tag_name().name() != "mujoco" {
         return invalid("root element must be <mujoco>");
@@ -183,6 +218,7 @@ pub fn load_str_in(xml: &str, dir: &Path) -> Result<Model, MjcfError> {
 
     let mut meshdir = dir.to_path_buf();
     let mut ctx = Ctx {
+        materials: HashMap::new(),
         degrees: true,
         eulerseq: *b"xyz",
         autolimits: true,
@@ -252,9 +288,18 @@ pub fn load_str_in(xml: &str, dir: &Path) -> Result<Model, MjcfError> {
             m.solver.iterations = parse_floats(v)?[0] as usize;
         }
         if let Some(v) = o.attribute("integrator") {
-            if v != "Euler" {
-                ctx.warnings.push(format!("integrator '{v}' not supported, using Euler"));
-            }
+            m.integrator = match v {
+                "Euler" => Integrator::Euler,
+                "implicitfast" => Integrator::ImplicitFast,
+                "implicit" => {
+                    ctx.warnings.push("integrator 'implicit' approximated by 'implicitfast'".into());
+                    Integrator::ImplicitFast
+                }
+                other => {
+                    ctx.warnings.push(format!("integrator '{other}' not supported, using Euler"));
+                    Integrator::Euler
+                }
+            };
         }
     }
 
@@ -263,26 +308,78 @@ pub fn load_str_in(xml: &str, dir: &Path) -> Result<Model, MjcfError> {
         for mesh in children(a, "mesh") {
             parse_mesh(&ctx, &mut b.m, mesh, &meshdir)?;
         }
+        for mat in children(a, "material") {
+            let class = mat.attribute("class").unwrap_or("main");
+            if let (Some(name), Some(rgba)) = (mat.attribute("name"), ctx.floats(&mat, class, "rgba")?) {
+                if rgba.len() == 4 {
+                    ctx.materials.insert(name.to_string(), [rgba[0] as f32, rgba[1] as f32, rgba[2] as f32, rgba[3] as f32]);
+                }
+            }
+        }
+        for tag in ["texture", "hfield", "skin"] {
+            if children(a, tag).next().is_some() {
+                ctx.warnings.push(format!("<asset><{tag}> is not supported yet and was ignored"));
+            }
+        }
     }
 
-    // world body
+    // world body; MJCF allows several <worldbody> sections (e.g. via <include>)
     add_body(&mut b, "world".into(), 0, Vec3::ZERO, Quat::IDENTITY);
-    let world = match children(root, "worldbody").next() {
-        Some(w) => w,
-        None => return invalid("missing <worldbody>"),
-    };
-    parse_body_contents(&mut ctx, &mut b, world, 0, "main")?;
+    let worlds: Vec<Node> = children(root, "worldbody").collect();
+    if worlds.is_empty() {
+        return invalid("missing <worldbody>");
+    }
+    for world in worlds {
+        parse_body_contents(&mut ctx, &mut b, world, 0, "main")?;
+    }
 
     finalize_inertia(&mut b)?;
 
+    for t in children(root, "tendon") {
+        for c in t.children().filter(|c| c.is_element()) {
+            parse_tendon(&mut ctx, &mut b.m, c)?;
+        }
+    }
     for act in children(root, "actuator") {
         for a in act.children().filter(|c| c.is_element()) {
             parse_actuator(&ctx, &mut b.m, a)?;
         }
     }
     b.m.nu = b.m.actuator_joint.len();
+    for e in children(root, "equality") {
+        for c in e.children().filter(|c| c.is_element()) {
+            parse_equality(&mut ctx, &mut b.m, c)?;
+        }
+    }
+    for c in children(root, "contact") {
+        for x in c.children().filter(|c| c.is_element()) {
+            if x.tag_name().name() == "exclude" {
+                let id = |a: &str| -> Result<usize, MjcfError> {
+                    let name = x.attribute(a).ok_or_else(|| MjcfError::Invalid(format!("<exclude> needs {a}")))?;
+                    b.m.body_id(name).ok_or_else(|| MjcfError::Invalid(format!("<exclude> references unknown body '{name}'")))
+                };
+                let pair = (id("body1")?, id("body2")?);
+                b.m.exclude_pairs.push(pair);
+            } else {
+                ctx.warnings.push(format!("<contact><{}> is not supported yet and was ignored", x.tag_name().name()));
+            }
+        }
+    }
+    for k in children(root, "keyframe") {
+        for key in children(k, "key") {
+            let nq = b.m.nq;
+            let qpos = key.attribute("qpos").map(parse_floats).transpose()?.unwrap_or_else(|| b.m.qpos0.clone());
+            let ctrl = key.attribute("ctrl").map(parse_floats).transpose()?.unwrap_or_else(|| vec![0.0; b.m.nu]);
+            if qpos.len() != nq || ctrl.len() != b.m.nu {
+                return invalid(format!("keyframe needs {nq} qpos and {} ctrl values", b.m.nu));
+            }
+            b.m.key_names.push(key.attribute("name").unwrap_or("").to_string());
+            b.m.key_qpos.push(qpos);
+            b.m.key_ctrl.push(ctrl);
+        }
+    }
 
-    for tag in ["contact", "equality", "tendon", "sensor", "keyframe", "visual", "statistic"] {
+    for tag in ["sensor", "visual", "statistic", "extension"] {
         if children(root, tag).next().is_some() {
             ctx.warnings.push(format!("<{tag}> is not supported yet and was ignored"));
         }
@@ -381,9 +478,24 @@ fn empty_model() -> Model {
         actuator_ctrlrange: vec![],
         actuator_forcelimited: vec![],
         actuator_forcerange: vec![],
+        actuator_moment: vec![],
+        tendon_names: vec![],
+        tendon_joints: vec![],
+        eq_names: vec![],
+        eq_joint1: vec![],
+        eq_joint2: vec![],
+        eq_polycoef: vec![],
+        eq_solref: vec![],
+        eq_solimp: vec![],
+        exclude_pairs: vec![],
+        geom_group: vec![],
+        key_names: vec![],
+        key_qpos: vec![],
+        key_ctrl: vec![],
         body_invweight: vec![],
         dof_invweight: vec![],
         qpos0: vec![],
+        qpos_reset: vec![],
         collision_pairs: vec![],
     }
 }
@@ -556,7 +668,11 @@ fn parse_geom(ctx: &mut Ctx, b: &mut Builder, node: Node, body: usize, class: &s
     let friction = ctx.floats(&node, class, "friction")?.and_then(|f| f.first().copied()).unwrap_or(1.0);
     let contype = ctx.float(&node, class, "contype", 1.0)? as u32;
     let conaffinity = ctx.float(&node, class, "conaffinity", 1.0)? as u32;
-    let rgba = ctx.floats(&node, class, "rgba")?.map(|v| [v[0] as f32, v[1] as f32, v[2] as f32, v[3] as f32]);
+    let rgba = match ctx.floats(&node, class, "rgba")? {
+        Some(v) if v.len() == 4 => Some([v[0] as f32, v[1] as f32, v[2] as f32, v[3] as f32]),
+        _ => ctx.get(&node, class, "material").and_then(|mat| ctx.materials.get(mat).copied()),
+    };
+    let group = ctx.float(&node, class, "group", 0.0)? as i32;
 
     let dataid = if gt == GeomType::Mesh {
         let name = ctx.get(&node, class, "mesh").ok_or_else(|| MjcfError::Invalid("mesh geom needs a 'mesh' attribute".into()))?;
@@ -615,6 +731,7 @@ fn parse_geom(ctx: &mut Ctx, b: &mut Builder, node: Node, body: usize, class: &s
     m.geom_conaffinity.push(conaffinity);
     m.geom_rgba.push(rgba.unwrap_or([0.5, 0.5, 0.5, 1.0]));
     m.geom_dataid.push(dataid);
+    m.geom_group.push(group);
     Ok(())
 }
 
@@ -736,15 +853,23 @@ fn parse_actuator(ctx: &Ctx, m: &mut Model, node: Node) -> Result<(), MjcfError>
         return invalid(format!("actuator <{tag}> not supported"));
     }
     let class = "main";
-    let Some(jname) = node.attribute("joint") else {
-        return invalid("only joint transmissions are supported");
+    let moment: Vec<(usize, Real)> = if let Some(jname) = node.attribute("joint") {
+        let Some(j) = m.joint_id(jname) else {
+            return invalid(format!("actuator references unknown joint '{jname}'"));
+        };
+        if !matches!(m.jnt_type[j], JointType::Hinge | JointType::Slide) {
+            return invalid("actuators on free/ball joints are not supported");
+        }
+        vec![(j, 1.0)]
+    } else if let Some(tname) = node.attribute("tendon") {
+        let Some(t) = m.tendon_names.iter().position(|n| n == tname) else {
+            return invalid(format!("actuator references unknown tendon '{tname}'"));
+        };
+        m.tendon_joints[t].clone()
+    } else {
+        return invalid("only joint and fixed-tendon transmissions are supported");
     };
-    let Some(j) = m.joint_id(jname) else {
-        return invalid(format!("actuator references unknown joint '{jname}'"));
-    };
-    if !matches!(m.jnt_type[j], JointType::Hinge | JointType::Slide) {
-        return invalid("actuators on free/ball joints are not supported");
-    }
+    let j = moment[0].0;
     let gear = ctx.float(&node, class, "gear", 1.0)?;
     let (gain, bias) = match tag {
         "motor" => (1.0, [0.0, 0.0, 0.0]),
@@ -789,5 +914,83 @@ fn parse_actuator(ctx: &Ctx, m: &mut Model, node: Node) -> Result<(), MjcfError>
     m.actuator_ctrlrange.push(cr);
     m.actuator_forcelimited.push(fl);
     m.actuator_forcerange.push(fr);
+    m.actuator_moment.push(moment);
+    Ok(())
+}
+
+fn parse_tendon(ctx: &mut Ctx, m: &mut Model, node: Node) -> Result<(), MjcfError> {
+    if node.tag_name().name() != "fixed" {
+        ctx.warnings.push(format!("<tendon><{}> is not supported yet and was ignored", node.tag_name().name()));
+        return Ok(());
+    }
+    let mut joints = vec![];
+    for jn in children(node, "joint") {
+        let name = jn.attribute("joint").unwrap_or("");
+        let j = m.joint_id(name).ok_or_else(|| MjcfError::Invalid(format!("tendon references unknown joint '{name}'")))?;
+        if !matches!(m.jnt_type[j], JointType::Hinge | JointType::Slide) {
+            return invalid("fixed tendons need hinge or slide joints");
+        }
+        let coef = jn.attribute("coef").map(parse_floats).transpose()?.map(|v| v[0]).unwrap_or(1.0);
+        joints.push((j, coef));
+    }
+    if joints.is_empty() {
+        return invalid("fixed tendon needs at least one joint");
+    }
+    let id = m.tendon_names.len();
+    m.tendon_names.push(node.attribute("name").map(String::from).unwrap_or_else(|| format!("tendon{id}")));
+    m.tendon_joints.push(joints);
+    Ok(())
+}
+
+fn parse_equality(ctx: &mut Ctx, m: &mut Model, node: Node) -> Result<(), MjcfError> {
+    let tag = node.tag_name().name();
+    if tag != "joint" {
+        ctx.warnings.push(format!("<equality><{tag}> is not supported yet and was ignored"));
+        return Ok(());
+    }
+    if node.attribute("active") == Some("false") {
+        return Ok(());
+    }
+    // equality defaults live under <default><equality .../>
+    let get = |name: &str| -> Option<&str> {
+        node.attribute(name).or_else(|| {
+            let class = node.attribute("class").unwrap_or("main");
+            ctx.defaults.get(class)?.by_tag.get("equality")?.get(name).map(String::as_str)
+        })
+    };
+    let joint = |a: &str| -> Result<usize, MjcfError> {
+        let name = node.attribute(a).unwrap_or("");
+        let j = m.joint_id(name).ok_or_else(|| MjcfError::Invalid(format!("equality references unknown joint '{name}'")))?;
+        if !matches!(m.jnt_type[j], JointType::Hinge | JointType::Slide) {
+            return invalid("joint equality needs hinge or slide joints");
+        }
+        Ok(j)
+    };
+    let j1 = joint("joint1")?;
+    let j2 = if node.attribute("joint2").is_some() { joint("joint2")? } else { usize::MAX };
+    let mut poly = [0.0, 1.0, 0.0, 0.0, 0.0];
+    if let Some(v) = get("polycoef") {
+        for (k, x) in parse_floats(v)?.into_iter().take(5).enumerate() {
+            poly[k] = x;
+        }
+    }
+    let mut solref = m.solver.solref;
+    if let Some(v) = get("solref") {
+        let r = parse_floats(v)?;
+        solref = [r[0], r.get(1).copied().unwrap_or(1.0)];
+    }
+    let mut solimp = m.solver.solimp;
+    if let Some(v) = get("solimp") {
+        for (k, x) in parse_floats(v)?.into_iter().take(5).enumerate() {
+            solimp[k] = x;
+        }
+    }
+    let id = m.eq_names.len();
+    m.eq_names.push(node.attribute("name").map(String::from).unwrap_or_else(|| format!("equality{id}")));
+    m.eq_joint1.push(j1);
+    m.eq_joint2.push(j2);
+    m.eq_polycoef.push(poly);
+    m.eq_solref.push(solref);
+    m.eq_solimp.push(solimp);
     Ok(())
 }

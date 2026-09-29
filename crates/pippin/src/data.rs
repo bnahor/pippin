@@ -40,6 +40,8 @@ pub struct Data {
     pub qfrc_constraint: Vec<Real>,
     pub qacc: Vec<Real>,
     pub actuator_force: Vec<Real>,
+    /// Whether each actuator's force hit its force range this step.
+    pub actuator_clamped: Vec<bool>,
 
     // ---- contacts / constraints ----
     pub contacts: Vec<Contact>,
@@ -83,7 +85,7 @@ impl Data {
         let nv = m.nv;
         Data {
             time: 0.0,
-            qpos: m.qpos0.clone(),
+            qpos: m.qpos_reset.clone(),
             qvel: vec![0.0; nv],
             ctrl: vec![0.0; m.nu],
             qfrc_applied: vec![0.0; nv],
@@ -108,6 +110,7 @@ impl Data {
             qfrc_constraint: vec![0.0; nv],
             qacc: vec![0.0; nv],
             actuator_force: vec![0.0; m.nu],
+            actuator_clamped: vec![false; m.nu],
             contacts: vec![],
             scratch: Scratch::default(),
         }
@@ -116,7 +119,7 @@ impl Data {
     /// Reset to the reference configuration.
     pub fn reset(&mut self, m: &Model) {
         self.time = 0.0;
-        self.qpos.copy_from_slice(&m.qpos0);
+        self.qpos.copy_from_slice(&m.qpos_reset);
         self.qvel.fill(0.0);
         self.ctrl.fill(0.0);
         self.qfrc_applied.fill(0.0);

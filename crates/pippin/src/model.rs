@@ -43,6 +43,9 @@ pub enum GeomType {
 pub enum Integrator {
     /// Semi-implicit Euler with implicit joint damping (MuJoCo "Euler").
     Euler,
+    /// Euler with implicit joint damping and actuator velocity terms
+    /// (MuJoCo "implicitfast"; Coriolis derivatives are not included).
+    ImplicitFast,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -194,6 +197,33 @@ pub struct Model {
     pub actuator_ctrlrange: Vec<[Real; 2]>,
     pub actuator_forcelimited: Vec<bool>,
     pub actuator_forcerange: Vec<[Real; 2]>,
+    /// Transmission as (joint, coefficient) pairs: length = sum coef * q.
+    /// A joint actuator is [(j, 1)]; a fixed-tendon actuator has one entry
+    /// per tendon joint.
+    pub actuator_moment: Vec<Vec<(usize, Real)>>,
+
+    // ---- fixed tendons ----
+    pub tendon_names: Vec<String>,
+    pub tendon_joints: Vec<Vec<(usize, Real)>>,
+
+    // ---- joint equality constraints: q1 - q1_0 = poly(q2 - q2_0) ----
+    pub eq_names: Vec<String>,
+    pub eq_joint1: Vec<usize>,
+    /// usize::MAX when the joint is fixed to a constant.
+    pub eq_joint2: Vec<usize>,
+    pub eq_polycoef: Vec<[Real; 5]>,
+    pub eq_solref: Vec<[Real; 2]>,
+    pub eq_solimp: Vec<[Real; 5]>,
+
+    /// Body pairs excluded from collision (`<contact><exclude>`).
+    pub exclude_pairs: Vec<(usize, usize)>,
+    /// Visual group per geom (MuJoCo convention; 0-2 visible by default).
+    pub geom_group: Vec<i32>,
+
+    // ---- keyframes ----
+    pub key_names: Vec<String>,
+    pub key_qpos: Vec<Vec<Real>>,
+    pub key_ctrl: Vec<Vec<Real>>,
 
     /// Inverse inertia at qpos0, (translational, rotational) per body; used to
     /// scale constraint softness like MuJoCo's `body_invweight0`.
@@ -203,6 +233,9 @@ pub struct Model {
 
     /// Reference configuration.
     pub qpos0: Vec<Real>,
+    /// State `Data::reset` returns to. Starts equal to `qpos0`; unlike
+    /// `qpos0` (the kinematic reference) it can be changed freely.
+    pub qpos_reset: Vec<Real>,
     /// Geom pairs that may collide (static filtering already applied).
     pub collision_pairs: Vec<(usize, usize)>,
 }
@@ -227,12 +260,18 @@ impl Model {
     pub fn geom_id(&self, name: &str) -> Option<usize> {
         self.geom_names.iter().position(|n| n == name)
     }
+    pub fn key_id(&self, name: &str) -> Option<usize> {
+        self.key_names.iter().position(|n| n == name)
+    }
     pub fn actuator_id(&self, name: &str) -> Option<usize> {
         self.actuator_names.iter().position(|n| n == name)
     }
 
     /// Finalize derived quantities. Called by loaders after filling raw fields.
     pub(crate) fn compile(&mut self) {
+        if self.qpos_reset.len() != self.qpos0.len() {
+            self.qpos_reset = self.qpos0.clone();
+        }
         let nbody = self.nbody();
 
         // dof tree
@@ -310,6 +349,9 @@ impl Model {
 
     fn can_collide(&self, g1: usize, g2: usize) -> bool {
         let (b1, b2) = (self.geom_body[g1], self.geom_body[g2]);
+        if self.exclude_pairs.iter().any(|&(a, b)| (a, b) == (b1, b2) || (a, b) == (b2, b1)) {
+            return false;
+        }
         let (w1, w2) = (self.body_weldid[b1], self.body_weldid[b2]);
         if w1 == w2 {
             return false;

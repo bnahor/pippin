@@ -33,7 +33,8 @@ pub enum Param {
     BodyInertia,
     /// Body center of mass in the body frame (3 values).
     BodyIpos,
-    /// Initial configuration used by reset (nq values, id 0).
+    /// State used by reset (nq values, id 0). The kinematic reference
+    /// configuration (MJCF `qpos0`, `ref`) is not affected.
     Qpos0,
 }
 
@@ -102,7 +103,7 @@ impl Model {
             Param::ActuatorBias => self.actuator_bias[id].to_vec(),
             Param::BodyInertia => (0..3).map(|k| self.body_inertia[id].0[4 * k]).collect(),
             Param::BodyIpos => self.body_ipos[id].0.to_vec(),
-            Param::Qpos0 => self.qpos0.clone(),
+            Param::Qpos0 => self.qpos_reset.clone(),
         }
     }
 
@@ -169,7 +170,7 @@ impl Model {
                 self.body_ipos[id] = Vec3::new(v[0], v[1], v[2]);
                 crate::forward::set_const(self);
             }
-            Param::Qpos0 => self.qpos0.copy_from_slice(v),
+            Param::Qpos0 => self.qpos_reset.copy_from_slice(v),
         }
         Ok(())
     }
