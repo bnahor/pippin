@@ -193,6 +193,8 @@ class SceneBuilder:
         self._defaults: list[ET.Element] = []
         self._compiler = {"angle": "radian", "autolimits": "true"}
         self._slots: list[_Slots] = []
+        self._sections: dict[str, list[ET.Element]] = {}
+        self._option: dict[str, str] = {}
         self._has_floor = False
 
     # ---- static scenery ----
@@ -238,6 +240,10 @@ class SceneBuilder:
             meshdir = os.path.join(base, comp.attrib.get("meshdir", comp.attrib.get("assetdir", "")))
         else:
             self._compiler["angle"] = "degree"
+        for opt in root.findall("option"):
+            for k, v in opt.attrib.items():
+                if k != "timestep":  # the scene owns the timestep
+                    self._option[k] = v
         for asset in root.findall("asset"):
             for a in asset:
                 if "file" in a.attrib and not os.path.isabs(a.attrib["file"]):
@@ -247,6 +253,9 @@ class SceneBuilder:
             self._defaults.extend(list(d))
         for act in root.findall("actuator"):
             self._actuators.extend(list(act))
+        for tag in ("tendon", "equality", "contact"):
+            for sec in root.findall(tag):
+                self._sections.setdefault(tag, []).extend(list(sec))
         mount = ET.Element("body", name=f"{name}_mount", pos=" ".join(map(str, pos)), quat=" ".join(map(str, quat)))
         for wb in root.findall("worldbody"):
             mount.extend(list(wb))
@@ -265,7 +274,7 @@ class SceneBuilder:
     def _xml(self) -> str:
         root = ET.Element("mujoco", model="pippin_scene")
         ET.SubElement(root, "compiler", **self._compiler)
-        ET.SubElement(root, "option", timestep=str(self.timestep))
+        ET.SubElement(root, "option", timestep=str(self.timestep), **self._option)
         if self._defaults:
             ET.SubElement(root, "default").extend(self._defaults)
         asset = ET.SubElement(root, "asset")
@@ -283,6 +292,9 @@ class SceneBuilder:
                     ET.SubElement(body, "geom", name=f"{g.name}{s}_c{c}", **spec.geom_attrs(meshes))
         for (path, scale), mname in meshes.items():
             ET.SubElement(asset, "mesh", name=mname, file=path, scale=f"{scale} {scale} {scale}")
+        for tag in ("tendon", "equality", "contact"):
+            if self._sections.get(tag):
+                ET.SubElement(root, tag).extend(self._sections[tag])
         if self._actuators:
             ET.SubElement(root, "actuator").extend(self._actuators)
         return ET.tostring(root, encoding="unicode")

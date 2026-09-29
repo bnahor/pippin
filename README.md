@@ -88,7 +88,18 @@ are:
 - per-environment initial state (`qpos0`)
 
 Robots load from **URDF** (validated against MuJoCo's own URDF import) or
-MJCF. **Meshes** (STL, OBJ) collide through their convex hull.
+MJCF, including [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie)
+models. **Meshes** (STL, OBJ) collide through their convex hull.
+
+The **Franka Panda** from Menagerie runs unmodified (fetch it with
+`scripts/fetch_assets.sh`). It uses tendon-driven fingers, equality
+constraints, and the `implicitfast` integrator. Against MuJoCo, a 3 s
+position-controlled trajectory matches to 2e-16 (`validation/compare_panda.py`).
+
+`examples/panda_grasp.py` runs a pick-and-lift. It uses IK waypoints and the
+Panda's own position actuators, and every environment gets a randomized
+cube. 16/16 environments lift their cube. A negative control with the
+gripper held open lifts none.
 
 ## End-to-end results (M5 Pro: 6 Super + 12 Performance cores)
 
