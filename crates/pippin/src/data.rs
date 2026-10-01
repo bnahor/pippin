@@ -73,6 +73,7 @@ pub(crate) struct Scratch {
     pub damp_h: Vec<Real>,
     pub newton_buf: Vec<Real>,
     pub newton_iters: usize,
+    pub island: crate::newton::IslandBuf,
     pub aabb: Vec<(Vec3, Vec3)>,
     pub cacc: Vec<Spatial>,
     pub cfrc: Vec<Spatial>,

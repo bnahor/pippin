@@ -10,7 +10,7 @@
 use std::f64::consts::PI;
 
 use crate::data::Data;
-use crate::math::{cholesky_solve, Real, Spatial, Vec3};
+use crate::math::{Real, Spatial, Vec3};
 use crate::model::{JointType, Model};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -142,7 +142,7 @@ pub fn solve(m: &Model, d: &mut Data, v: &mut [Real], v_pos: &mut Vec<Real>) {
     mj.extend_from_slice(&jac);
     for r in 0..nr {
         let x = &mut mj[r * nv..(r + 1) * nv];
-        cholesky_solve(&d.qm_chol, nv, x);
+        crate::forward::mass_solve(m, &d.qm_chol, x);
         let a: Real = (0..nv).map(|k| jac[r * nv + k] * x[k]).sum();
         rows[r].inv_a = if a > 1e-12 { 1.0 / a } else { 0.0 };
     }

@@ -412,10 +412,23 @@ impl SpatialInertia {
 /// In-place dense Cholesky (lower) of an n x n row-major SPD matrix.
 /// Returns false if the matrix is not positive definite.
 pub fn cholesky(a: &mut [Real], n: usize) -> bool {
+    cholesky_block(a, n, 0..n)
+}
+
+/// Solve L L^T x = b in place given the lower factor from [`cholesky`].
+pub fn cholesky_solve(l: &[Real], n: usize, x: &mut [Real]) {
+    cholesky_solve_block(l, n, 0..n, x)
+}
+
+/// Cholesky of the diagonal block `r` of a row-major matrix with row
+/// stride `stride` (entries outside the block are ignored).
+pub fn cholesky_block(a: &mut [Real], stride: usize, r: std::ops::Range<usize>) -> bool {
     use crate::simd::dot;
-    for j in 0..n {
-        let (head, tail) = a.split_at_mut((j + 1) * n);
-        let (rj, diag) = head[j * n..].split_at_mut(j);
+    let s0 = r.start;
+    for j in r.clone() {
+        let (head, tail) = a.split_at_mut((j + 1) * stride);
+        let row = &mut head[j * stride + s0..j * stride + j + 1];
+        let (rj, diag) = row.split_at_mut(j - s0);
         let rj: &[Real] = rj;
         let d = diag[0] - dot(rj, rj);
         if d <= 0.0 {
@@ -424,27 +437,28 @@ pub fn cholesky(a: &mut [Real], n: usize) -> bool {
         let d = d.sqrt();
         diag[0] = d;
         let inv = 1.0 / d;
-        for i in (j + 1)..n {
-            let ri = &mut tail[(i - j - 1) * n..(i - j) * n];
-            ri[j] = (ri[j] - dot(&ri[..j], rj)) * inv;
+        for i in (j + 1)..r.end {
+            let ri = &mut tail[(i - j - 1) * stride + s0..(i - j - 1) * stride + j + 1];
+            let k = j - s0;
+            ri[k] = (ri[k] - dot(&ri[..k], rj)) * inv;
         }
     }
     true
 }
 
-/// Solve L L^T x = b in place given the lower factor from [`cholesky`].
-pub fn cholesky_solve(l: &[Real], n: usize, x: &mut [Real]) {
+/// Solve with the factor of diagonal block `r` (see [`cholesky_block`]),
+/// acting on `x[r]` only.
+pub fn cholesky_solve_block(l: &[Real], stride: usize, r: std::ops::Range<usize>, x: &mut [Real]) {
     use crate::simd::{axpy, dot};
-    // forward: L y = b, row-wise dot products
-    for i in 0..n {
-        x[i] = (x[i] - dot(&l[i * n..i * n + i], &x[..i])) / l[i * n + i];
+    let s0 = r.start;
+    for i in r.clone() {
+        x[i] = (x[i] - dot(&l[i * stride + s0..i * stride + i], &x[s0..i])) / l[i * stride + i];
     }
-    // backward: L^T x = y, as row-wise axpy updates so memory access stays
-    // contiguous (the column walk of L^T would stride by n)
-    for i in (0..n).rev() {
-        x[i] /= l[i * n + i];
+    for i in r.rev() {
+        x[i] /= l[i * stride + i];
         let xi = x[i];
-        axpy(-xi, &l[i * n..i * n + i], &mut x[..i]);
+        let (head, _) = x.split_at_mut(i);
+        axpy(-xi, &l[i * stride + s0..i * stride + i], &mut head[s0..]);
     }
 }
 
@@ -458,6 +472,33 @@ mod tests {
         let q2 = Quat::from_mat(&q.to_mat());
         for i in 0..4 {
             assert!((q.0[i] - q2.0[i]).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn block_cholesky_matches_dense_on_block_diagonal() {
+        // two blocks: [0, 2) and [2, 5)
+        let n = 5;
+        let mut a = vec![0.0; n * n];
+        let blocks = [0..2, 2..5];
+        for b in &blocks {
+            for i in b.clone() {
+                for j in b.clone() {
+                    a[i * n + j] = if i == j { 4.0 + i as Real } else { 0.3 + 0.1 * (i + j) as Real };
+                }
+            }
+        }
+        let rhs: Vec<Real> = (0..n).map(|i| 1.0 + i as Real).collect();
+        let (mut dense, mut x1) = (a.clone(), rhs.clone());
+        assert!(cholesky(&mut dense, n));
+        cholesky_solve(&dense, n, &mut x1);
+        let (mut blk, mut x2) = (a.clone(), rhs.clone());
+        for b in &blocks {
+            assert!(cholesky_block(&mut blk, n, b.clone()));
+            cholesky_solve_block(&blk, n, b.clone(), &mut x2);
+        }
+        for i in 0..n {
+            assert!((x1[i] - x2[i]).abs() < 1e-14);
         }
     }
 

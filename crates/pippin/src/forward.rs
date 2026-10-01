@@ -6,7 +6,7 @@
 
 use crate::collision::{self, Contact, GeomPose, Hit};
 use crate::data::Data;
-use crate::math::{cholesky, cholesky_solve, Mat3, Quat, Real, Spatial, SpatialInertia, Vec3};
+use crate::math::{cholesky, cholesky_block, cholesky_solve, cholesky_solve_block, Mat3, Quat, Real, Spatial, SpatialInertia, Vec3};
 use crate::model::{Integrator, JointType, Model, SolverKind};
 use crate::{newton, solver};
 
@@ -354,14 +354,14 @@ pub fn step(m: &Model, d: &mut Data) {
             // As in MuJoCo: solve constraints with M, then apply implicit
             // damping: qacc = (M + hD)^-1 (qfrc_smooth + qfrc_constraint).
             factor_mass(m, d, 0.0);
-            cholesky_solve(&d.qm_chol, nv, &mut acc);
+            mass_solve(m, &d.qm_chol, &mut acc);
             newton::solve(m, d, &mut acc);
             if damped {
                 factor_mass(m, d, h);
                 for k in 0..nv {
                     acc[k] = smooth[k] + d.qfrc_constraint[k];
                 }
-                cholesky_solve(&d.qm_chol, nv, &mut acc);
+                mass_solve(m, &d.qm_chol, &mut acc);
             }
             v.extend((0..nv).map(|k| d.qvel[k] + h * acc[k]));
             v_pos.clear();
@@ -370,7 +370,7 @@ pub fn step(m: &Model, d: &mut Data) {
         SolverKind::Pgs => {
             // PGS works on velocities with the damped inertia throughout
             factor_mass(m, d, h);
-            cholesky_solve(&d.qm_chol, nv, &mut acc);
+            mass_solve(m, &d.qm_chol, &mut acc);
             v.extend((0..nv).map(|k| d.qvel[k] + h * acc[k]));
             solver::solve(m, d, &mut v, &mut v_pos);
         }
@@ -393,8 +393,10 @@ fn factor_mass(m: &Model, d: &mut Data, h: Real) {
     let nv = m.nv;
     d.qm_chol.copy_from_slice(&d.qm);
     add_implicit_terms(m, &d.actuator_clamped, h, &mut d.qm_chol);
-    if !cholesky(&mut d.qm_chol, nv) {
-        panic!("mass matrix is not positive definite");
+    for r in &m.dof_blocks {
+        if !cholesky_block(&mut d.qm_chol, nv, r.clone()) {
+            panic!("mass matrix is not positive definite");
+        }
     }
 }
 
@@ -425,6 +427,13 @@ fn add_implicit_terms(m: &Model, clamped: &[bool], h: Real, mat: &mut [Real]) {
                 }
             }
         }
+    }
+}
+
+/// Solve (block-diagonal) M x = b in place with the factor from `factor_mass`.
+pub fn mass_solve(m: &Model, l: &[Real], x: &mut [Real]) {
+    for r in &m.dof_blocks {
+        cholesky_solve_block(l, m.nv, r.clone(), x);
     }
 }
 

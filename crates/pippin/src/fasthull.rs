@@ -110,7 +110,9 @@ impl FastHull {
                 }
             }
             if next == v {
-                self.hint.store(v as u32, Ordering::Relaxed);
+                // the hint is read-only after construction: hulls are shared by
+                // every environment and thread, and a shared write per query
+                // made one cache line bounce between all cores
                 return v;
             }
             v = next;

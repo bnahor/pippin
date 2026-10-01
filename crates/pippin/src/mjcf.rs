@@ -489,6 +489,7 @@ fn empty_model() -> Model {
         eq_solref: vec![],
         eq_solimp: vec![],
         exclude_pairs: vec![],
+        dof_blocks: vec![],
         geom_group: vec![],
         key_names: vec![],
         key_qpos: vec![],

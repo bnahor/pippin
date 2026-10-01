@@ -218,6 +218,11 @@ pub struct Model {
     pub eq_solref: Vec<[Real; 2]>,
     pub eq_solimp: Vec<[Real; 5]>,
 
+    /// Contiguous dof ranges that are independent in M and in the implicit
+    /// terms: one per kinematic tree, merged when a multi-joint actuator
+    /// couples trees. M is factored block by block.
+    pub dof_blocks: Vec<std::ops::Range<usize>>,
+
     /// Body pairs excluded from collision (`<contact><exclude>`).
     pub exclude_pairs: Vec<(usize, usize)>,
     /// Visual group per geom (MuJoCo convention; 0-2 visible by default).
@@ -290,6 +295,8 @@ impl Model {
             self.body_lastdof[b] = last;
         }
 
+        self.dof_blocks = self.compute_dof_blocks();
+
         // weld ids: bodies rigidly attached share an id
         self.body_weldid = (0..nbody).collect();
         for b in 1..nbody {
@@ -306,6 +313,53 @@ impl Model {
             // Stiffest spring the integrator can resolve stably, with margin.
             self.solver.contact_hertz = 0.25 / self.timestep;
         }
+    }
+
+    fn compute_dof_blocks(&self) -> Vec<std::ops::Range<usize>> {
+        let nv = self.nv;
+        // tree root dof of each dof
+        let mut root: Vec<usize> = (0..nv).collect();
+        for k in 0..nv {
+            let mut r = k;
+            while self.dof_parent[r] != usize::MAX {
+                r = self.dof_parent[r];
+            }
+            root[k] = r;
+        }
+        // merge trees coupled by tendon actuators
+        let mut group: Vec<usize> = root.clone();
+        let find = |g: &Vec<usize>, mut x: usize| {
+            while g[x] != x {
+                x = g[x];
+            }
+            x
+        };
+        for moment in &self.actuator_moment {
+            let dofs: Vec<usize> = moment.iter().map(|&(j, _)| self.jnt_dofadr[j]).collect();
+            for w in dofs.windows(2) {
+                let (a, b) = (find(&group, root[w[0]]), find(&group, root[w[1]]));
+                if a != b {
+                    group[a.max(b)] = a.min(b);
+                }
+            }
+        }
+        let gid: Vec<usize> = (0..nv).map(|k| find(&group, root[k])).collect();
+        // contiguous runs; fall back to one block if a group is split
+        let mut blocks: Vec<std::ops::Range<usize>> = vec![];
+        let mut seen = std::collections::HashSet::new();
+        let mut k = 0;
+        while k < nv {
+            let mut e = k + 1;
+            while e < nv && gid[e] == gid[k] {
+                e += 1;
+            }
+            if !seen.insert(gid[k]) {
+                return if nv > 0 { vec![0..nv] } else { vec![] };
+            }
+            blocks.push(k..e);
+            k = e;
+        }
+        blocks
     }
 
     /// Bounding box in the geom frame (center, half-extents).

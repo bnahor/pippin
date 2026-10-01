@@ -17,6 +17,19 @@ use crate::simd;
 use crate::model::{JointType, Model};
 use crate::solver::point_jac;
 
+/// Reusable buffers for per-island subproblems.
+#[derive(Clone, Debug, Default)]
+pub struct IslandBuf {
+    idx: Vec<usize>,
+    rows: Vec<usize>,
+    qm: Vec<Real>,
+    jac: Vec<Real>,
+    nrows: Vec<NRow>,
+    zeros: Vec<Real>,
+    sub: Vec<Real>,
+    warm: Vec<Real>,
+}
+
 /// Per-row constants of the soft constraint model.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NRow {
@@ -204,19 +217,12 @@ fn build_rows(m: &Model, d: &mut Data) -> usize {
     nr
 }
 
-/// Replace the unconstrained acceleration `a` with the constrained one.
-pub fn solve(m: &Model, d: &mut Data, a: &mut [Real]) {
-    let nv = m.nv;
-    let nr = build_rows(m, d);
-    d.qfrc_constraint.fill(0.0);
-    if nr == 0 {
-        return;
-    }
-    let s = &mut d.scratch;
-    // constraints are solved against the undamped inertia (see forward::step)
-    s.damp_h.clear();
-    s.damp_h.resize(nv, 0.0);
-    let mut buf = std::mem::take(&mut s.newton_buf);
+/// Newton iterations on one dense subproblem. `a` enters as the
+/// unconstrained acceleration (also copied to `a0`) and leaves constrained.
+/// Returns the number of iterations.
+#[allow(clippy::too_many_arguments)]
+fn newton_dense(w: &Workspace, a: &mut [Real], warm: Option<&[Real]>, max_iters: usize, tolerance: Real, buf: &mut Vec<Real>) -> usize {
+    let (nv, nr) = (w.nv, w.nr);
     buf.clear();
     buf.resize(6 * nv + 2 * nr + nv * nv, 0.0);
     let (a0, rest) = buf.split_at_mut(nv);
@@ -229,14 +235,12 @@ pub fn solve(m: &Model, d: &mut Data, a: &mut [Real]) {
     let (jp, hess) = rest.split_at_mut(nr);
     a0.copy_from_slice(a);
 
-    let w = Workspace { nv, nr, jac: &s.jac, rows: &s.nrows, qm: &d.qm, damp_h: &s.damp_h };
-
     // warm start from the previous solution when it is better
-    if d.qacc.len() == nv {
+    if let Some(warm) = warm {
         let c0 = w.cost(a0, a0, jar, tmp, tmp2);
-        let c1 = w.cost(&d.qacc, a0, jar, tmp, tmp2);
+        let c1 = w.cost(warm, a0, jar, tmp, tmp2);
         if c1 < c0 {
-            a.copy_from_slice(&d.qacc);
+            a.copy_from_slice(warm);
         }
     }
 
@@ -246,7 +250,7 @@ pub fn solve(m: &Model, d: &mut Data, a: &mut [Real]) {
 
     let mut iters = 0;
     let mut prev_active: u128 = u128::MAX;
-    while iters < m.solver.iterations.max(1) {
+    while iters < max_iters.max(1) {
         iters += 1;
         // residuals, active set, gradient
         let mut active: u128 = 0;
@@ -267,7 +271,7 @@ pub fn solve(m: &Model, d: &mut Data, a: &mut [Real]) {
             }
         }
         let gnorm = grad.iter().map(|x| x * x).sum::<Real>().sqrt();
-        if gnorm < m.solver.tolerance * scale || (nr <= 128 && active == prev_active && iters > 1) {
+        if gnorm < tolerance * scale || (nr <= 128 && active == prev_active && iters > 1) {
             break;
         }
         prev_active = active;
@@ -350,15 +354,119 @@ pub fn solve(m: &Model, d: &mut Data, a: &mut [Real]) {
         }
     }
 
-    // constraint force at the solution: qfrc_c = -J' D (J a - aref)_-
-    for r in 0..nr {
+    iters
+}
+
+/// Add the constraint force at the solution, qfrc_c[idx] += -J' D (J a - aref)_active.
+fn add_constraint_force(w: &Workspace, a: &[Real], idx: Option<&[usize]>, qfrc: &mut [Real]) {
+    for r in 0..w.nr {
         let v = w.dot_j(r, a) - w.rows[r].aref;
         if w.rows[r].active(v) {
             let f = -w.rows[r].d * v;
-            for (q, j) in d.qfrc_constraint.iter_mut().zip(w.jrow(r)) {
-                *q += f * j;
+            for (k, j) in w.jrow(r).iter().enumerate() {
+                qfrc[idx.map_or(k, |ix| ix[k])] += f * j;
             }
         }
+    }
+}
+
+/// Replace the unconstrained acceleration `a` with the constrained one.
+///
+/// Dofs split into islands: independent kinematic trees (`dof_blocks`) joined
+/// by any constraint row that touches both. Each island with constraints is
+/// solved as its own small dense problem; unconstrained islands keep `a`.
+pub fn solve(m: &Model, d: &mut Data, a: &mut [Real]) {
+    let nv = m.nv;
+    let nr = build_rows(m, d);
+    d.qfrc_constraint.fill(0.0);
+    if nr == 0 {
+        return;
+    }
+    let s = &mut d.scratch;
+    s.damp_h.clear();
+    s.damp_h.resize(nv, 0.0);
+    let mut buf = std::mem::take(&mut s.newton_buf);
+    let (max_iters, tol) = (m.solver.iterations, m.solver.tolerance);
+
+    // islands over dof blocks
+    let nb = m.dof_blocks.len();
+    let mut block_of = vec![0usize; nv];
+    for (b, r) in m.dof_blocks.iter().enumerate() {
+        block_of[r.clone()].iter_mut().for_each(|x| *x = b);
+    }
+    let mut parent: Vec<usize> = (0..nb).collect();
+    fn find(p: &mut [usize], mut x: usize) -> usize {
+        while p[x] != x {
+            p[x] = p[p[x]];
+            x = p[x];
+        }
+        x
+    }
+    let mut row_block = vec![usize::MAX; nr];
+    for r in 0..nr {
+        for (k, &j) in s.jac[r * nv..(r + 1) * nv].iter().enumerate() {
+            if j != 0.0 {
+                let b = block_of[k];
+                if row_block[r] == usize::MAX {
+                    row_block[r] = b;
+                } else {
+                    let (x, y) = (find(&mut parent, row_block[r]), find(&mut parent, b));
+                    if x != y {
+                        parent[x.max(y)] = x.min(y);
+                    }
+                }
+            }
+        }
+    }
+    let island_of_block: Vec<usize> = (0..nb).map(|b| find(&mut parent, b)).collect();
+    let mut islands: Vec<usize> = (0..nr).filter(|&r| row_block[r] != usize::MAX).map(|r| island_of_block[row_block[r]]).collect();
+    islands.sort_unstable();
+    islands.dedup();
+
+    let mut iters = 0;
+    if islands.len() == 1 && (0..nb).all(|b| island_of_block[b] == islands[0]) {
+        // one island spanning everything: solve in place
+        let w = Workspace { nv, nr, jac: &s.jac, rows: &s.nrows, qm: &d.qm, damp_h: &s.damp_h };
+        let warm = (d.qacc.len() == nv).then_some(&d.qacc[..]);
+        iters = newton_dense(&w, a, warm, max_iters, tol, &mut buf);
+        add_constraint_force(&w, a, None, &mut d.qfrc_constraint);
+    } else {
+        // reuse scratch buffers: these are tiny problems, allocation would dominate
+        let mut ib = std::mem::take(&mut s.island);
+        for &isl in &islands {
+            ib.idx.clear();
+            ib.idx.extend((0..nb).filter(|&b| island_of_block[b] == isl).flat_map(|b| m.dof_blocks[b].clone()));
+            ib.rows.clear();
+            ib.rows.extend((0..nr).filter(|&r| row_block[r] != usize::MAX && island_of_block[row_block[r]] == isl));
+            let k = ib.idx.len();
+            ib.qm.clear();
+            for &i in &ib.idx {
+                ib.qm.extend(ib.idx.iter().map(|&j| d.qm[i * nv + j]));
+            }
+            ib.jac.clear();
+            for &r in &ib.rows {
+                ib.jac.extend(ib.idx.iter().map(|&c| s.jac[r * nv + c]));
+            }
+            ib.nrows.clear();
+            ib.nrows.extend(ib.rows.iter().map(|&r| s.nrows[r]));
+            ib.zeros.clear();
+            ib.zeros.resize(k, 0.0);
+            ib.sub.clear();
+            ib.sub.extend(ib.idx.iter().map(|&i| a[i]));
+            let has_warm = d.qacc.len() == nv;
+            ib.warm.clear();
+            if has_warm {
+                ib.warm.extend(ib.idx.iter().map(|&i| d.qacc[i]));
+            }
+            let w = Workspace { nv: k, nr: ib.rows.len(), jac: &ib.jac, rows: &ib.nrows, qm: &ib.qm, damp_h: &ib.zeros };
+            let warm = has_warm.then_some(&ib.warm[..]);
+            iters = iters.max(newton_dense(&w, &mut ib.sub, warm, max_iters, tol, &mut buf));
+            for (t, &i) in ib.idx.iter().enumerate() {
+                a[i] = ib.sub[t];
+            }
+            add_constraint_force(&w, &ib.sub, Some(&ib.idx), &mut d.qfrc_constraint);
+        }
+        s.island = ib;
     }
     s.newton_iters = iters;
     s.newton_buf = buf;
