@@ -24,3 +24,7 @@ path = "../../benches/bench.rs"
 [[example]]
 name = "contacts"
 path = "../../benches/contacts.rs"
+
+[[example]]
+name = "hull_support"
+path = "../../benches/hull_support.rs"

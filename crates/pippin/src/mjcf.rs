@@ -459,6 +459,7 @@ fn empty_model() -> Model {
         geom_conaffinity: vec![],
         geom_rgba: vec![],
         geom_rbound: vec![],
+        geom_aabb: vec![],
         geom_dataid: vec![],
         geom_shape: vec![],
         mesh_names: vec![],

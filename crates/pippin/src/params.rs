@@ -129,6 +129,7 @@ impl Model {
                 }
                 self.geom_size[id] = Vec3::new(v[0], v[1], v[2]);
                 self.geom_rbound[id] = self.rbound(id);
+                self.geom_aabb[id] = self.local_aabb(id);
                 self.geom_shape[id] = self.build_shape(id);
             }
             Param::GeomRgba => self.geom_rgba[id] = [v[0] as f32, v[1] as f32, v[2] as f32, v[3] as f32],

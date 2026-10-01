@@ -6,6 +6,7 @@
 pub mod batch;
 pub mod collision;
 pub mod data;
+pub mod fasthull;
 pub mod forward;
 pub mod math;
 pub mod mesh;

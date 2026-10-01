@@ -134,7 +134,9 @@ impl MetalRenderer {
         ds.setDepthWriteEnabled(true);
         let depth_state = device.newDepthStencilStateWithDescriptor(&ds).ok_or("depth state")?;
 
-        let mesh = mesh::build_indexed(scene);
+        // simplification error ~ a fraction of a pixel at this resolution
+        let lod_error = 0.5 / config.width.max(config.height).max(1) as f32;
+        let mesh = mesh::build_indexed(scene, lod_error);
         let base_appearance: Vec<Appearance> =
             scene.geoms.iter().map(|g| Appearance { rgba: g.rgba, scale: [1.0; 3], pad: 0.0 }).collect();
         let views: Vec<GpuView> = config

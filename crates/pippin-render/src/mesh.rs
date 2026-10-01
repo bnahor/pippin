@@ -111,11 +111,13 @@ pub struct IndexedMesh {
     pub indices: Vec<u32>,
 }
 
-pub fn build_indexed(scene: &Scene) -> IndexedMesh {
+/// `lod_error`: simplification error allowed for meshes, relative to each
+/// mesh's extent (0 keeps full detail). Renders at ~N pixels can use ~1/N.
+pub fn build_indexed(scene: &Scene, lod_error: f32) -> IndexedMesh {
     let tris = build(scene);
     let mut map = std::collections::HashMap::with_capacity(tris.len());
     let mut vertices = Vec::new();
-    let indices = tris
+    let mut indices: Vec<u32> = tris
         .iter()
         .map(|v| {
             let key = (v.pos.map(f32::to_bits), v.normal.map(f32::to_bits), v.geom, v.flags);
@@ -125,7 +127,61 @@ pub fn build_indexed(scene: &Scene) -> IndexedMesh {
             })
         })
         .collect();
+    for (g, geom) in scene.geoms.iter().enumerate() {
+        if let (Shape::Mesh(k), true) = (geom.shape, visible(geom)) {
+            if let Some(mesh) = scene.meshes.get(k) {
+                append_mesh(mesh, g as u32, lod_error, &mut vertices, &mut indices);
+            }
+        }
+    }
+    let indices = if vertices.is_empty() { indices } else { meshopt::optimize_vertex_cache(&indices, vertices.len()) };
     IndexedMesh { vertices, indices }
+}
+
+/// MuJoCo convention: groups 0-2 are visible by default.
+fn visible(geom: &pippin_env::GeomVisual) -> bool {
+    geom.group <= 2 && geom.rgba[3] > 0.0
+}
+
+/// Weld, simplify to `lod_error`, and append a mesh with smooth normals.
+fn append_mesh(mesh: &pippin_env::Mesh, geom: u32, lod_error: f32, vertices: &mut Vec<Vtx>, indices: &mut Vec<u32>) {
+    // weld identical positions so neighbouring triangles share vertices
+    let mut map = std::collections::HashMap::new();
+    let mut pos: Vec<[f32; 3]> = vec![];
+    let mut idx: Vec<u32> = Vec::with_capacity(mesh.triangles.len() * 3);
+    for t in &mesh.triangles {
+        for &i in t {
+            let p = mesh.vertices[i as usize];
+            let id = *map.entry(p.map(f32::to_bits)).or_insert_with(|| {
+                pos.push(p);
+                (pos.len() - 1) as u32
+            });
+            idx.push(id);
+        }
+    }
+    if lod_error > 0.0 && idx.len() > 3 * 64 {
+        let bytes: &[u8] = unsafe { std::slice::from_raw_parts(pos.as_ptr() as *const u8, pos.len() * 12) };
+        if let Ok(adapter) = meshopt::VertexDataAdapter::new(bytes, 12, 0) {
+            let simplified = meshopt::simplify(&idx, &adapter, 3 * 32, lod_error, meshopt::SimplifyOptions::None, None);
+            if simplified.len() >= 3 {
+                idx = simplified;
+            }
+        }
+    }
+    // area-weighted vertex normals
+    let mut nrm = vec![[0.0f32; 3]; pos.len()];
+    for t in idx.chunks(3) {
+        let [a, b, c] = [pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]];
+        let n = cross(sub(b, a), sub(c, a));
+        for &i in t {
+            for k in 0..3 {
+                nrm[i as usize][k] += n[k];
+            }
+        }
+    }
+    let base = vertices.len() as u32;
+    vertices.extend(pos.iter().zip(&nrm).map(|(&p, &n)| Vtx { pos: p, geom, normal: normalize(n), flags: 0 }));
+    indices.extend(idx.iter().map(|i| base + i));
 }
 
 /// Triangle list (three vertices per triangle).
@@ -172,14 +228,8 @@ pub fn build(scene: &Scene) -> Vec<Vtx> {
                 revolve(&mut b, &[(r, -h, 0.0, -1.0), (0.0, -h, 0.0, -1.0)]);
             }
             Shape::Box => box_mesh(&mut b, s),
-            Shape::Mesh(k) => {
-                if let Some(mesh) = scene.meshes.get(k) {
-                    for t in &mesh.triangles {
-                        let p = t.map(|i| mesh.vertices[i as usize]);
-                        b.flat(p[0], p[1], p[2]);
-                    }
-                }
-            }
+            // meshes are appended indexed and simplified by `build_indexed`
+            Shape::Mesh(_) => {}
         }
     }
     b.out

@@ -215,10 +215,26 @@ pub fn collide(m: &Model, d: &mut Data) {
     d.contacts.clear();
     let margin = m.solver.contact_margin;
     let mut hits: Vec<Hit> = std::mem::take(&mut d.scratch.hits);
+    // world-aligned bounding boxes from each geom's local box
+    let mut aabb = std::mem::take(&mut d.scratch.aabb);
+    aabb.clear();
+    aabb.extend((0..m.ngeom()).map(|g| {
+        let (c, h) = m.geom_aabb[g];
+        let r = &d.geom_xmat[g];
+        if !h[0].is_finite() {
+            return (Vec3::ZERO, h);
+        }
+        let center = d.geom_xpos[g] + r.mul_vec(c);
+        let half = Vec3::new(
+            r.0[0].abs() * h[0] + r.0[1].abs() * h[1] + r.0[2].abs() * h[2],
+            r.0[3].abs() * h[0] + r.0[4].abs() * h[1] + r.0[5].abs() * h[2],
+            r.0[6].abs() * h[0] + r.0[7].abs() * h[1] + r.0[8].abs() * h[2],
+        );
+        (center, half)
+    }));
     for &(g1, g2) in &m.collision_pairs {
-        // bounding-sphere cull (planes have infinite radius)
-        let r = m.geom_rbound[g1] + m.geom_rbound[g2] + margin;
-        if r.is_finite() && (d.geom_xpos[g1] - d.geom_xpos[g2]).norm2() > r * r {
+        let ((c1, h1), (c2, h2)) = (aabb[g1], aabb[g2]);
+        if (0..3).any(|k| (c1[k] - c2[k]).abs() > h1[k] + h2[k] + margin) {
             continue;
         }
         let pose = |g: usize| GeomPose { typ: m.geom_type[g], pos: d.geom_xpos[g], mat: d.geom_xmat[g], size: m.geom_size[g] };
@@ -240,6 +256,7 @@ pub fn collide(m: &Model, d: &mut Data) {
         }
     }
     d.scratch.hits = hits;
+    d.scratch.aabb = aabb;
 }
 
 /// Compute all position- and velocity-dependent quantities (no integration).

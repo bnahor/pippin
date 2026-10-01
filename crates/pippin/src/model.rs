@@ -164,6 +164,9 @@ pub struct Model {
     pub geom_rgba: Vec<[f32; 4]>,
     /// Bounding sphere radius about the geom center (inf for planes).
     pub geom_rbound: Vec<Real>,
+    /// Local bounding box (center, half-extents) in the geom frame, for the
+    /// broad phase. Planes are unbounded.
+    pub geom_aabb: Vec<(Vec3, Vec3)>,
     /// Mesh index for mesh geoms, usize::MAX otherwise.
     pub geom_dataid: Vec<usize>,
     /// Collision shape for the general (parry) narrow phase. Cylinders are
@@ -296,11 +299,31 @@ impl Model {
         }
 
         self.geom_rbound = (0..self.ngeom()).map(|g| self.rbound(g)).collect();
+        self.geom_aabb = (0..self.ngeom()).map(|g| self.local_aabb(g)).collect();
         self.geom_shape = (0..self.ngeom()).map(|g| self.build_shape(g)).collect();
         self.rebuild_collision_pairs();
         if self.solver.contact_hertz <= 0.0 {
             // Stiffest spring the integrator can resolve stably, with margin.
             self.solver.contact_hertz = 0.25 / self.timestep;
+        }
+    }
+
+    /// Bounding box in the geom frame (center, half-extents).
+    pub(crate) fn local_aabb(&self, g: usize) -> (Vec3, Vec3) {
+        let s = self.geom_size[g];
+        let inf = Real::INFINITY;
+        match self.geom_type[g] {
+            GeomType::Plane => (Vec3::ZERO, Vec3::new(inf, inf, inf)),
+            GeomType::Sphere => (Vec3::ZERO, Vec3::new(s[0], s[0], s[0])),
+            GeomType::Capsule => (Vec3::ZERO, Vec3::new(s[0], s[0], s[0] + s[1])),
+            GeomType::Box => (Vec3::ZERO, s),
+            GeomType::Cylinder => (Vec3::ZERO, Vec3::new(s[0], s[0], s[1])),
+            GeomType::Mesh => {
+                let v = &self.mesh_hull[self.geom_dataid[g]].vertices;
+                let lo = v.iter().fold(Vec3::new(inf, inf, inf), |a, p| a.min(*p));
+                let hi = v.iter().fold(Vec3::new(-inf, -inf, -inf), |a, p| a.max(*p));
+                ((lo + hi) * 0.5, (hi - lo) * 0.5)
+            }
         }
     }
 
@@ -342,7 +365,10 @@ impl Model {
             GeomType::Mesh => {
                 let hull = &self.mesh_hull[self.geom_dataid[g]];
                 let pts: Vec<Vector> = hull.vertices.iter().map(|v| Vector::new(v[0], v[1], v[2])).collect();
-                SharedShape::convex_hull(&pts).unwrap_or_else(|| SharedShape::ball(1e-6))
+                match parry3d_f64::shape::ConvexPolyhedron::from_convex_hull(&pts) {
+                    Some(h) => SharedShape(std::sync::Arc::new(crate::fasthull::FastHull::new(h))),
+                    None => SharedShape::ball(1e-6),
+                }
             }
         }
     }

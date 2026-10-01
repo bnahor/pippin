@@ -69,13 +69,14 @@ def main():
         for g in range(groups):
             env.recv()
         a = np.tile(HOME, (N // groups, 1))
-        steps, t0 = 0, None
-        for i in range(12 * groups):
-            if i == 2 * groups:
-                t0, steps = time.perf_counter(), 0
-            obs = env.recv() if i else None
-            g = obs["group"] if obs else 0
+        for g in range(groups):  # keep every group in flight
             env.send(g, a)
+        for _ in range(2 * groups):  # warm-up
+            env.send(env.recv()["group"], a)
+        steps, t0 = 0, time.perf_counter()
+        for _ in range(10 * groups):
+            obs = env.recv()
+            env.send(obs["group"], a)
             steps += N // groups
         dt = time.perf_counter() - t0
         print(f"physics (10 substeps/action) + 128x128 render, groups={groups}: "
